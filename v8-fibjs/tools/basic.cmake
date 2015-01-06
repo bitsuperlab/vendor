@@ -20,6 +20,10 @@ if (NOT CMAKE_BUILD_TYPE)
         FORCE)
 endif()
 
+if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  add_definitions (-DMACOSX -D_DARWIN_C_SOURCE)
+endif ()
+
 if(NOT flags)
 	set(flags " ")
 endif()
@@ -28,7 +32,7 @@ set(flags "${flags} -fshort-wchar -fsigned-char -fmessage-length=0 -Wno-long-lon
 set(link_flags " ")
 
 if(${OS} STREQUAL "Darwin")
-	set(flags "${flags} -mmacosx-version-min=10.6")
+#	set(flags "${flags} -mmacosx-version-min=10.6")
 endif()
 
 if(${CMAKE_BUILD_TYPE} STREQUAL "Release32")
