@@ -11,7 +11,7 @@
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/macro-assembler.h"
-#include "src/serialize.h"
+#include "src/snapshot/serialize.h"
 #include "src/string-stream.h"
 
 namespace v8 {
@@ -43,7 +43,7 @@ const char* V8NameConverter::NameOfAddress(byte* pc) const {
     int offs = static_cast<int>(pc - code_->instruction_start());
     // print as code offset, if it seems reasonable
     if (0 <= offs && offs < code_->instruction_size()) {
-      SNPrintF(v8_buffer_, "%d  (%p)", offs, pc);
+      SNPrintF(v8_buffer_, "%x  (%p)", offs, pc);
       return v8_buffer_.start();
     }
   }
@@ -112,7 +112,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
                  "%08" V8PRIxPTR "      jump table entry %4" V8PRIdPTR,
                  reinterpret_cast<intptr_t>(ptr),
                  ptr - begin);
-        pc += 4;
+        pc += sizeof(ptr);
       } else {
         decode_buffer[0] = '\0';
         pc += d.InstructionDecode(decode_buffer, pc);
@@ -146,7 +146,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
     }
 
     // Instruction address and instruction offset.
-    out.AddFormatted("%p  %4d  ", prev_pc, prev_pc - begin);
+    out.AddFormatted("%p  %4x  ", prev_pc, prev_pc - begin);
 
     // Instruction.
     out.AddFormatted("%s", decode_buffer.start());
@@ -173,6 +173,11 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
         } else {
           out.AddFormatted("    ;; debug: position %d", relocinfo.data());
         }
+      } else if (rmode == RelocInfo::DEOPT_REASON) {
+        Deoptimizer::DeoptReason reason =
+            static_cast<Deoptimizer::DeoptReason>(relocinfo.data());
+        out.AddFormatted("    ;; debug: deopt reason '%s'",
+                         Deoptimizer::GetDeoptReason(reason));
       } else if (rmode == RelocInfo::EMBEDDED_OBJECT) {
         HeapStringAllocator allocator;
         StringStream accumulator(&allocator);
@@ -180,8 +185,8 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
         SmartArrayPointer<const char> obj_name = accumulator.ToCString();
         out.AddFormatted("    ;; object: %s", obj_name.get());
       } else if (rmode == RelocInfo::EXTERNAL_REFERENCE) {
-        const char* reference_name =
-            ref_encoder.NameOfAddress(relocinfo.target_reference());
+        const char* reference_name = ref_encoder.NameOfAddress(
+            isolate, relocinfo.target_external_reference());
         out.AddFormatted("    ;; external reference (%s)", reference_name);
       } else if (RelocInfo::IsCodeTarget(rmode)) {
         out.AddFormatted("    ;; code:");
@@ -290,4 +295,5 @@ int Disassembler::Decode(Isolate* isolate, std::ostream* os, byte* begin,
 
 #endif  // ENABLE_DISASSEMBLER
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
