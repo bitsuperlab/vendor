@@ -6,7 +6,9 @@ set(flags "-std=gnu++0x")
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../tools/basic.cmake)
 
-target_link_libraries( v8 exlib)
+IF(NOT APPLE)
+   target_link_libraries( v8 exlib dl )
+ENDIF(NOT APPLE)
 
 add_definitions(-DV8_NO_FAST_TLS=1 -DV8_DEPRECATION_WARNINGS=1 -DENABLE_GDB_JIT_INTERFACE=1 -DENABLE_HANDLE_ZAPPING=1)
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
