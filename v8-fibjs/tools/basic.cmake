@@ -4,6 +4,7 @@ include(../tools/os.cmake)
 project(${name})
 
 file(GLOB_RECURSE src_list "*.c*")
+
 add_library(${name} ${src_list})
 
 #SET(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../bin/${OS}_${BUILD_TYPE})
@@ -28,7 +29,11 @@ if(NOT flags)
 	set(flags " ")
 endif()
 
-set(flags "${flags} -fshort-wchar -fsigned-char -fmessage-length=0 -Wno-long-long -fdata-sections -Wno-strict-aliasing -ffunction-sections -fno-exceptions -fvisibility=hidden -D_FILE_OFFSET_BITS=64")
+if(MSVC)
+else()
+    set(flags "${flags} -fshort-wchar -fsigned-char -fmessage-length=0 -Wno-long-long -fdata-sections -Wno-strict-aliasing -ffunction-sections -fno-exceptions -fvisibility=hidden -D_FILE_OFFSET_BITS=64")
+endif()
+
 set(link_flags " ")
 
 if(${OS} STREQUAL "Darwin")
