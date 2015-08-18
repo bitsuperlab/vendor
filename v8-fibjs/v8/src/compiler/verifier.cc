@@ -194,10 +194,7 @@ void Verifier::Visitor::Check(Node* node) {
       break;
     case IrOpcode::kDead:
       // Dead is never connected to the graph.
-      // TODO(mstarzinger): Make the GraphReducer immediately perform control
-      // reduction in case control is killed. This will prevent {Dead} from
-      // being reachable after a phase finished. Then re-enable below assert.
-      // UNREACHABLE();
+      UNREACHABLE();
       break;
     case IrOpcode::kBranch: {
       // Branch uses are IfTrue and IfFalse.
@@ -321,13 +318,13 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kParameter: {
       // Parameters have the start node as inputs.
       CHECK_EQ(1, input_count);
-      CHECK_EQ(IrOpcode::kStart,
-               NodeProperties::GetValueInput(node, 0)->opcode());
       // Parameter has an input that produces enough values.
-      int index = OpParameter<int>(node);
-      Node* input = NodeProperties::GetValueInput(node, 0);
+      int const index = ParameterIndexOf(node->op());
+      Node* const start = NodeProperties::GetValueInput(node, 0);
+      CHECK_EQ(IrOpcode::kStart, start->opcode());
       // Currently, parameter indices start at -1 instead of 0.
-      CHECK_GT(input->op()->ValueOutputCount(), index + 1);
+      CHECK_LE(-1, index);
+      CHECK_LT(index + 1, start->op()->ValueOutputCount());
       // Type can be anything.
       CheckUpperIs(node, Type::Any());
       break;
@@ -524,11 +521,13 @@ void Verifier::Visitor::Check(Node* node) {
       break;
     case IrOpcode::kJSLoadProperty:
     case IrOpcode::kJSLoadNamed:
+    case IrOpcode::kJSLoadGlobal:
       // Type can be anything.
       CheckUpperIs(node, Type::Any());
       break;
     case IrOpcode::kJSStoreProperty:
     case IrOpcode::kJSStoreNamed:
+    case IrOpcode::kJSStoreGlobal:
       // Type is empty.
       CheckNotTyped(node);
       break;
@@ -585,7 +584,9 @@ void Verifier::Visitor::Check(Node* node) {
       break;
     }
     case IrOpcode::kJSForInDone: {
-      CheckValueInputIs(node, 0, Type::UnsignedSmall());
+      // TODO(bmeurer): OSR breaks this invariant, although the node is not user
+      // visible, so we know it is safe (fullcodegen has an unsigned smi there).
+      // CheckValueInputIs(node, 0, Type::UnsignedSmall());
       break;
     }
     case IrOpcode::kJSForInNext: {
@@ -593,7 +594,9 @@ void Verifier::Visitor::Check(Node* node) {
       break;
     }
     case IrOpcode::kJSForInStep: {
-      CheckValueInputIs(node, 0, Type::UnsignedSmall());
+      // TODO(bmeurer): OSR breaks this invariant, although the node is not user
+      // visible, so we know it is safe (fullcodegen has an unsigned smi there).
+      // CheckValueInputIs(node, 0, Type::UnsignedSmall());
       CheckUpperIs(node, Type::UnsignedSmall());
       break;
     }
@@ -633,6 +636,19 @@ void Verifier::Visitor::Check(Node* node) {
       CheckValueInputIs(node, 1, Type::Number());
       // TODO(rossberg): activate once we retype after opcode changes.
       // CheckUpperIs(node, Type::Number());
+      break;
+    case IrOpcode::kNumberShiftLeft:
+    case IrOpcode::kNumberShiftRight:
+      // (Signed32, Unsigned32) -> Signed32
+      CheckValueInputIs(node, 0, Type::Signed32());
+      CheckValueInputIs(node, 1, Type::Unsigned32());
+      CheckUpperIs(node, Type::Signed32());
+      break;
+    case IrOpcode::kNumberShiftRightLogical:
+      // (Unsigned32, Unsigned32) -> Unsigned32
+      CheckValueInputIs(node, 0, Type::Unsigned32());
+      CheckValueInputIs(node, 1, Type::Unsigned32());
+      CheckUpperIs(node, Type::Unsigned32());
       break;
     case IrOpcode::kNumberToInt32:
       // Number -> Signed32
@@ -826,6 +842,7 @@ void Verifier::Visitor::Check(Node* node) {
     case IrOpcode::kUint64Div:
     case IrOpcode::kUint64Mod:
     case IrOpcode::kUint64LessThan:
+    case IrOpcode::kUint64LessThanOrEqual:
     case IrOpcode::kFloat32Add:
     case IrOpcode::kFloat32Sub:
     case IrOpcode::kFloat32Mul:

@@ -332,6 +332,9 @@ const FPURegister f31 = { 31 };
 #define cp s7
 #define kLithiumScratchReg s3
 #define kLithiumScratchReg2 s4
+#define kInterpreterBytecodeOffsetRegister t4
+#define kInterpreterBytecodeArrayRegister t5
+#define kInterpreterDispatchTableRegister t6
 #define kLithiumScratchDouble f30
 #define kDoubleRegZero f28
 // Used on mips32r6 for compare operations.
@@ -525,9 +528,6 @@ class Assembler : public AssemblerBase {
   // of that call in the instruction stream.
   inline static Address target_address_from_return_address(Address pc);
 
-  // Return the code target address of the patch debug break slot
-  inline static Address break_address_from_return_address(Address pc);
-
   static void JumpToJumpRegister(Address pc);
 
   static void QuietNaN(HeapObject* nan);
@@ -575,25 +575,14 @@ class Assembler : public AssemblerBase {
   // target and the return address.
   static const int kCallTargetAddressOffset = 4 * kInstrSize;
 
-  // Distance between start of patched return sequence and the emitted address
-  // to jump to.
-  static const int kPatchReturnSequenceAddressOffset = 0;
-
   // Distance between start of patched debug break slot and the emitted address
   // to jump to.
-  static const int kPatchDebugBreakSlotAddressOffset =  0 * kInstrSize;
+  static const int kPatchDebugBreakSlotAddressOffset = 4 * kInstrSize;
 
   // Difference between address of current opcode and value read from pc
   // register.
   static const int kPcLoadDelta = 4;
 
-  static const int kPatchDebugBreakSlotReturnOffset = 4 * kInstrSize;
-
-  // Number of instructions used for the JS return sequence. The constant is
-  // used by the debugger to patch the JS return sequence.
-  static const int kJSReturnSequenceInstructions = 7;
-  static const int kJSReturnSequenceLength =
-      kJSReturnSequenceInstructions * kInstrSize;
   static const int kDebugBreakSlotInstructions = 4;
   static const int kDebugBreakSlotLength =
       kDebugBreakSlotInstructions * kInstrSize;
@@ -645,6 +634,10 @@ class Assembler : public AssemblerBase {
   void b(Label* L) { b(branch_offset(L, false)>>2); }
   void bal(int16_t offset);
   void bal(Label* L) { bal(branch_offset(L, false)>>2); }
+  void bc(int32_t offset);
+  void bc(Label* L) { bc(branch_offset(L, false) >> 2); }
+  void balc(int32_t offset);
+  void balc(Label* L) { balc(branch_offset(L, false) >> 2); }
 
   void beq(Register rs, Register rt, int16_t offset);
   void beq(Register rs, Register rt, Label* L) {
@@ -753,8 +746,8 @@ class Assembler : public AssemblerBase {
   void jal(int32_t target);
   void jalr(Register rs, Register rd = ra);
   void jr(Register target);
-  void j_or_jr(int32_t target, Register rs);
-  void jal_or_jalr(int32_t target, Register rs);
+  void jic(Register rt, int16_t offset);
+  void jialc(Register rt, int16_t offset);
 
 
   // -------Data-processing-instructions---------
@@ -819,6 +812,14 @@ class Assembler : public AssemblerBase {
   void swr(Register rd, const MemOperand& rs);
 
 
+  // ---------PC-Relative-instructions-----------
+
+  void addiupc(Register rs, int32_t imm19);
+  void lwpc(Register rs, int32_t offset19);
+  void auipc(Register rs, int16_t imm16);
+  void aluipc(Register rs, int16_t imm16);
+
+
   // ----------------Prefetch--------------------
 
   void pref(int32_t hint, const MemOperand& rs);
@@ -879,6 +880,7 @@ class Assembler : public AssemblerBase {
   void ins_(Register rt, Register rs, uint16_t pos, uint16_t size);
   void ext_(Register rt, Register rs, uint16_t pos, uint16_t size);
   void bitswap(Register rd, Register rt);
+  void align(Register rd, Register rs, Register rt, uint8_t bp);
 
   // --------Coprocessor-instructions----------------
 
@@ -1045,11 +1047,11 @@ class Assembler : public AssemblerBase {
 
   // Debugging.
 
-  // Mark address of the ExitJSFrame code.
-  void RecordJSReturn();
+  // Mark generator continuation.
+  void RecordGeneratorContinuation();
 
   // Mark address of a debug break slot.
-  void RecordDebugBreakSlot();
+  void RecordDebugBreakSlot(RelocInfo::Mode mode, int argc = 0);
 
   // Record the AST id of the CallIC being compiled, so that it can be placed
   // in the relocation information.
@@ -1283,7 +1285,7 @@ class Assembler : public AssemblerBase {
   inline void CheckBuffer();
   void GrowBuffer();
   inline void emit(Instr x);
-  inline void CheckTrampolinePoolQuick();
+  inline void CheckTrampolinePoolQuick(int extra_instructions = 0);
 
   // Instruction generation.
   // We have 3 different kind of encoding layout on MIPS.
@@ -1347,6 +1349,8 @@ class Assembler : public AssemblerBase {
                          Register r1,
                          FPURegister r2,
                          int32_t  j);
+  void GenInstrImmediate(Opcode opcode, Register rs, int32_t j);
+  void GenInstrImmediate(Opcode opcode, int32_t offset26);
 
 
   void GenInstrJump(Opcode opcode,

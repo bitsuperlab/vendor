@@ -119,6 +119,9 @@ class Scope: public ZoneObject {
   // outer scope. Only possible for function scopes; at most one variable.
   void DeclareFunctionVar(VariableDeclaration* declaration) {
     DCHECK(is_function_scope());
+    // Handle implicit declaration of the function name in named function
+    // expressions before other declarations.
+    decls_.InsertAt(0, declaration, zone());
     function_ = declaration;
   }
 
@@ -165,16 +168,11 @@ class Scope: public ZoneObject {
   // such a variable again if it was added; otherwise this is a no-op.
   void RemoveUnresolved(VariableProxy* var);
 
-  // Creates a new internal variable in this scope.  The name is only used
-  // for printing and cannot be used to find the variable.  In particular,
-  // the only way to get hold of the temporary is by keeping the Variable*
-  // around.
-  Variable* NewInternal(const AstRawString* name);
-
-  // Creates a new temporary variable in this scope.  The name is only used
-  // for printing and cannot be used to find the variable.  In particular,
-  // the only way to get hold of the temporary is by keeping the Variable*
-  // around.  The name should not clash with a legitimate variable names.
+  // Creates a new temporary variable in this scope's TemporaryScope.  The
+  // name is only used for printing and cannot be used to find the variable.
+  // In particular, the only way to get hold of the temporary is by keeping the
+  // Variable* around.  The name should not clash with a legitimate variable
+  // names.
   Variable* NewTemporary(const AstRawString* name);
 
   // Adds the specific declaration node to the list of declarations in
@@ -280,20 +278,12 @@ class Scope: public ZoneObject {
   bool is_block_scope() const { return scope_type_ == BLOCK_SCOPE; }
   bool is_with_scope() const { return scope_type_ == WITH_SCOPE; }
   bool is_arrow_scope() const { return scope_type_ == ARROW_SCOPE; }
-  void tag_as_class_scope() {
-    DCHECK(is_block_scope());
-    block_scope_is_class_scope_ = true;
-  }
-  bool is_class_scope() const {
-    return is_block_scope() && block_scope_is_class_scope_;
-  }
-  bool is_declaration_scope() const {
-    return is_eval_scope() || is_function_scope() ||
-        is_module_scope() || is_script_scope();
-  }
+  bool is_declaration_scope() const { return is_declaration_scope_; }
   bool is_strict_eval_scope() const {
     return is_eval_scope() && is_strict(language_mode_);
   }
+
+  void set_is_declaration_scope() { is_declaration_scope_ = true; }
 
   // Information about which scopes calls eval.
   bool calls_eval() const { return scope_calls_eval_; }
@@ -449,6 +439,7 @@ class Scope: public ZoneObject {
   // handled separately.
   void CollectStackAndContextLocals(
       ZoneList<Variable*>* stack_locals, ZoneList<Variable*>* context_locals,
+      ZoneList<Variable*>* context_globals,
       ZoneList<Variable*>* strong_mode_free_variables = nullptr);
 
   // Current number of var or const locals.
@@ -457,9 +448,11 @@ class Scope: public ZoneObject {
   // Result of variable allocation.
   int num_stack_slots() const { return num_stack_slots_; }
   int num_heap_slots() const { return num_heap_slots_; }
+  int num_global_slots() const { return num_global_slots_; }
 
   int StackLocalCount() const;
   int ContextLocalCount() const;
+  int ContextGlobalCount() const;
 
   // For script scopes, the number of module literals (including nested ones).
   int num_modules() const { return num_modules_; }
@@ -470,6 +463,9 @@ class Scope: public ZoneObject {
   // Make sure this scope and all outer scopes are eagerly compiled.
   void ForceEagerCompilation()  { force_eager_compilation_ = true; }
 
+  // Determine if we can parse a function literal in this scope lazily.
+  bool AllowsLazyParsing() const;
+
   // Determine if we can use lazy compilation for this scope.
   bool AllowsLazyCompilation() const;
 
@@ -479,20 +475,23 @@ class Scope: public ZoneObject {
   // True if the outer context of this scope is always the native context.
   bool HasTrivialOuterContext() const;
 
-  // True if the outer context allows lazy compilation of this scope.
-  bool HasLazyCompilableOuterContext() const;
-
   // The number of contexts between this and scope; zero if this == scope.
   int ContextChainLength(Scope* scope);
 
-  // Find the script scope.
-  // Used in modules implemenetation to find hosting scope.
-  // TODO(rossberg): is this needed?
-  Scope* ScriptScope();
-
-  // Find the first function, global, or eval scope.  This is the scope
-  // where var declarations will be hoisted to in the implementation.
+  // Find the first function, script, eval or (declaration) block scope. This is
+  // the scope where var declarations will be hoisted to in the implementation.
   Scope* DeclarationScope();
+
+  // Find the first non-block declaration scope. This should be either a script,
+  // function, or eval scope. Same as DeclarationScope(), but skips
+  // declaration "block" scopes. Used for differentiating associated
+  // function objects (i.e., the scope for which a function prologue allocates
+  // a context) or declaring temporaries.
+  Scope* ClosureScope();
+
+  // Find the first (non-arrow) function or script scope.  This is where
+  // 'this' is bound, and what determines the function kind.
+  Scope* ReceiverScope();
 
   Handle<ScopeInfo> GetScopeInfo(Isolate* isolate);
 
@@ -544,8 +543,6 @@ class Scope: public ZoneObject {
 
   // The scope type.
   ScopeType scope_type_;
-  // Some block scopes are tagged as class scopes.
-  bool block_scope_is_class_scope_;
   // If the scope is a function scope, this is the function kind.
   FunctionKind function_kind_;
 
@@ -558,8 +555,6 @@ class Scope: public ZoneObject {
   // variables may be implicitly 'declared' by being used (possibly in
   // an inner scope) with no intervening with statements or eval calls.
   VariableMap variables_;
-  // Compiler-allocated (user-invisible) internals.
-  ZoneList<Variable*> internals_;
   // Compiler-allocated (user-invisible) temporaries.
   ZoneList<Variable*> temps_;
   // Parameter list in source order.
@@ -620,17 +615,21 @@ class Scope: public ZoneObject {
   // constructed based on a serialized scope info or a catch context).
   bool already_resolved_;
 
+  // True if it holds 'var' declarations.
+  bool is_declaration_scope_;
+
   // Computed as variables are declared.
   int num_var_or_const_;
 
   // Computed via AllocateVariables; function, block and catch scopes only.
   int num_stack_slots_;
   int num_heap_slots_;
+  int num_global_slots_;
 
   // The number of modules (including nested ones).
   int num_modules_;
 
-  // For module scopes, the host scope's internal variable binding this module.
+  // For module scopes, the host scope's temporary variable binding this module.
   Variable* module_var_;
 
   // Rest parameter
@@ -722,7 +721,8 @@ class Scope: public ZoneObject {
   void AllocateHeapSlot(Variable* var);
   void AllocateParameterLocals(Isolate* isolate);
   void AllocateNonParameterLocal(Isolate* isolate, Variable* var);
-  void AllocateNonParameterLocals(Isolate* isolate);
+  void AllocateDeclaredGlobal(Isolate* isolate, Variable* var);
+  void AllocateNonParameterLocalsAndDeclaredGlobals(Isolate* isolate);
   void AllocateVariablesRecursively(Isolate* isolate);
   void AllocateParameter(Variable* var, int index);
   void AllocateReceiver();

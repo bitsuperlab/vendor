@@ -15,16 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\event.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="include\fiber.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\lockfree.h">
+    <ClInclude Include="include\osconfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\osconfig.h">
+    <ClInclude Include="include\stack.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\thread.h">
@@ -50,9 +47,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\fbAsyncEvent.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\fbCondVar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -81,6 +75,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\thread.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\win_lock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\osx_tls.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

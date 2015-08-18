@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/ast.h"
 #include "src/ast-numbering.h"
 #include "src/scopes.h"
@@ -11,10 +9,9 @@
 namespace v8 {
 namespace internal {
 
-
 class AstNumberingVisitor final : public AstVisitor {
  public:
-  explicit AstNumberingVisitor(Isolate* isolate, Zone* zone)
+  AstNumberingVisitor(Isolate* isolate, Zone* zone)
       : AstVisitor(),
         next_id_(BailoutId::FirstUsable().ToInt()),
         properties_(zone),
@@ -33,6 +30,10 @@ class AstNumberingVisitor final : public AstVisitor {
 
   bool Finish(FunctionLiteral* node);
 
+  void VisitVariableProxyReference(VariableProxy* node);
+  void VisitPropertyReference(Property* node);
+  void VisitReference(Expression* expr);
+
   void VisitStatements(ZoneList<Statement*>* statements) override;
   void VisitDeclarations(ZoneList<Declaration*>* declarations) override;
   void VisitArguments(ZoneList<Expression*>* arguments);
@@ -46,7 +47,7 @@ class AstNumberingVisitor final : public AstVisitor {
 
   void IncrementNodeCount() { properties_.add_node_count(1); }
   void DisableSelfOptimization() {
-    properties_.flags()->Add(kDontSelfOptimize);
+    properties_.flags() |= AstProperties::kDontSelfOptimize;
   }
   void DisableOptimization(BailoutReason reason) {
     dont_optimize_reason_ = reason;
@@ -54,15 +55,11 @@ class AstNumberingVisitor final : public AstVisitor {
   }
   void DisableCrankshaft(BailoutReason reason) {
     if (FLAG_turbo_shipping) {
-      return properties_.flags()->Add(kDontCrankshaft);
+      properties_.flags() |= AstProperties::kDontCrankshaft;
+    } else {
+      dont_optimize_reason_ = reason;
+      DisableSelfOptimization();
     }
-    dont_optimize_reason_ = reason;
-    DisableSelfOptimization();
-  }
-  void DisableCaching(BailoutReason reason) {
-    dont_optimize_reason_ = reason;
-    DisableSelfOptimization();
-    properties_.flags()->Add(kDontCache);
   }
 
   template <typename Node>
@@ -152,13 +149,18 @@ void AstNumberingVisitor::VisitRegExpLiteral(RegExpLiteral* node) {
 }
 
 
-void AstNumberingVisitor::VisitVariableProxy(VariableProxy* node) {
+void AstNumberingVisitor::VisitVariableProxyReference(VariableProxy* node) {
   IncrementNodeCount();
   if (node->var()->IsLookupSlot()) {
     DisableCrankshaft(kReferenceToAVariableWhichRequiresDynamicLookup);
   }
-  ReserveFeedbackSlots(node);
   node->set_base_id(ReserveIdRange(VariableProxy::num_ids()));
+}
+
+
+void AstNumberingVisitor::VisitVariableProxy(VariableProxy* node) {
+  VisitVariableProxyReference(node);
+  ReserveFeedbackSlots(node);
 }
 
 
@@ -296,6 +298,7 @@ void AstNumberingVisitor::VisitWhileStatement(WhileStatement* node) {
 void AstNumberingVisitor::VisitTryCatchStatement(TryCatchStatement* node) {
   IncrementNodeCount();
   DisableOptimization(kTryCatchStatement);
+  node->set_base_id(ReserveIdRange(TryCatchStatement::num_ids()));
   Visit(node->try_block());
   Visit(node->catch_block());
 }
@@ -304,17 +307,33 @@ void AstNumberingVisitor::VisitTryCatchStatement(TryCatchStatement* node) {
 void AstNumberingVisitor::VisitTryFinallyStatement(TryFinallyStatement* node) {
   IncrementNodeCount();
   DisableOptimization(kTryFinallyStatement);
+  node->set_base_id(ReserveIdRange(TryFinallyStatement::num_ids()));
   Visit(node->try_block());
   Visit(node->finally_block());
 }
 
 
-void AstNumberingVisitor::VisitProperty(Property* node) {
+void AstNumberingVisitor::VisitPropertyReference(Property* node) {
   IncrementNodeCount();
-  ReserveFeedbackSlots(node);
   node->set_base_id(ReserveIdRange(Property::num_ids()));
   Visit(node->key());
   Visit(node->obj());
+}
+
+
+void AstNumberingVisitor::VisitReference(Expression* expr) {
+  DCHECK(expr->IsProperty() || expr->IsVariableProxy());
+  if (expr->IsProperty()) {
+    VisitPropertyReference(expr->AsProperty());
+  } else {
+    VisitVariableProxyReference(expr->AsVariableProxy());
+  }
+}
+
+
+void AstNumberingVisitor::VisitProperty(Property* node) {
+  VisitPropertyReference(node);
+  ReserveFeedbackSlots(node);
 }
 
 
@@ -322,7 +341,7 @@ void AstNumberingVisitor::VisitAssignment(Assignment* node) {
   IncrementNodeCount();
   node->set_base_id(ReserveIdRange(Assignment::num_ids()));
   if (node->is_compound()) VisitBinaryOperation(node->binary_operation());
-  Visit(node->target());
+  VisitReference(node->target());
   Visit(node->value());
   ReserveFeedbackSlots(node);
 }
@@ -543,10 +562,6 @@ bool AstNumberingVisitor::Renumber(FunctionLiteral* node) {
   }
 
   VisitDeclarations(scope->declarations());
-  if (scope->is_function_scope() && scope->function() != NULL) {
-    // Visit the name of the named function expression.
-    Visit(scope->function());
-  }
   VisitStatements(node->body());
 
   return Finish(node);

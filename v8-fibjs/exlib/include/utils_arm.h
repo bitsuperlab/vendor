@@ -39,9 +39,9 @@ inline T *CompareAndSwap(T *volatile *ptr, T *old_value, T *new_value)
     return oldval;
 }
 
-inline int32_t CompareAndSwap(volatile int32_t *ptr, int32_t old_value, int32_t new_value)
+inline intptr_t CompareAndSwap(volatile intptr_t *ptr, intptr_t old_value, intptr_t new_value)
 {
-    int32_t oldval, res;
+    intptr_t oldval, res;
 
     do
     {
@@ -62,10 +62,10 @@ inline int32_t CompareAndSwap(volatile int32_t *ptr, int32_t old_value, int32_t 
     return oldval;
 }
 
-inline int32_t atom_add(volatile int32_t *dest, int32_t incr)
+inline intptr_t atom_add(volatile intptr_t *dest, intptr_t incr)
 {
-    int32_t value;
-    int32_t res;
+    intptr_t value;
+    intptr_t res;
 
     do
     {
@@ -81,20 +81,20 @@ inline int32_t atom_add(volatile int32_t *dest, int32_t incr)
     return value;
 }
 
-inline int32_t atom_inc(volatile int32_t *dest)
+inline intptr_t atom_inc(volatile intptr_t *dest)
 {
     return atom_add(dest, 1);
 }
 
-inline int32_t atom_dec(volatile int32_t *dest)
+inline intptr_t atom_dec(volatile intptr_t *dest)
 {
     return atom_add(dest, -1);
 }
 
-inline int32_t atom_xchg(volatile int32_t *ptr, int32_t new_value)
+inline intptr_t atom_xchg(volatile intptr_t *ptr, intptr_t new_value)
 {
-    int32_t old_value;
-    int32_t res;
+    intptr_t old_value;
+    intptr_t res;
 
     do
     {

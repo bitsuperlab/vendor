@@ -74,7 +74,6 @@ Scope::Scope(Zone* zone, Scope* outer_scope, ScopeType scope_type,
              AstValueFactory* ast_value_factory, FunctionKind function_kind)
     : inner_scopes_(4, zone),
       variables_(zone),
-      internals_(4, zone),
       temps_(4, zone),
       params_(4, zone),
       unresolved_(16, zone),
@@ -97,7 +96,6 @@ Scope::Scope(Zone* zone, Scope* inner_scope, ScopeType scope_type,
              Handle<ScopeInfo> scope_info, AstValueFactory* value_factory)
     : inner_scopes_(4, zone),
       variables_(zone),
-      internals_(4, zone),
       temps_(4, zone),
       params_(4, zone),
       unresolved_(16, zone),
@@ -123,7 +121,6 @@ Scope::Scope(Zone* zone, Scope* inner_scope,
              AstValueFactory* value_factory)
     : inner_scopes_(1, zone),
       variables_(zone),
-      internals_(0, zone),
       temps_(0, zone),
       params_(0, zone),
       unresolved_(0, zone),
@@ -151,8 +148,10 @@ void Scope::SetDefaults(ScopeType scope_type, Scope* outer_scope,
                         FunctionKind function_kind) {
   outer_scope_ = outer_scope;
   scope_type_ = scope_type;
+  is_declaration_scope_ =
+      is_eval_scope() || is_function_scope() ||
+      is_module_scope() || is_script_scope();
   function_kind_ = function_kind;
-  block_scope_is_class_scope_ = false;
   scope_name_ = ast_value_factory_->empty_string();
   dynamics_ = nullptr;
   receiver_ = nullptr;
@@ -179,6 +178,7 @@ void Scope::SetDefaults(ScopeType scope_type, Scope* outer_scope,
   num_var_or_const_ = 0;
   num_stack_slots_ = 0;
   num_heap_slots_ = 0;
+  num_global_slots_ = 0;
   num_modules_ = 0;
   module_var_ = NULL,
   rest_parameter_ = NULL;
@@ -189,7 +189,6 @@ void Scope::SetDefaults(ScopeType scope_type, Scope* outer_scope,
   if (!scope_info.is_null()) {
     scope_calls_eval_ = scope_info->CallsEval();
     language_mode_ = scope_info->language_mode();
-    block_scope_is_class_scope_ = scope_info->block_scope_is_class_scope();
     function_kind_ = scope_info->function_kind();
   }
 }
@@ -283,11 +282,14 @@ bool Scope::Analyze(ParseInfo* info) {
   }
 
 #ifdef DEBUG
-  if (info->isolate()->bootstrapper()->IsActive()
-          ? FLAG_print_builtin_scopes
-          : FLAG_print_scopes) {
-    scope->Print();
+  bool native = info->isolate()->bootstrapper()->IsActive();
+  if (!info->shared_info().is_null()) {
+    Object* script = info->shared_info()->script();
+    native = script->IsScript() &&
+             Script::cast(script)->type()->value() == Script::TYPE_NATIVE;
   }
+
+  if (native ? FLAG_print_builtin_scopes : FLAG_print_scopes) scope->Print();
 #endif
 
   info->set_scope(scope);
@@ -316,24 +318,20 @@ void Scope::Initialize() {
     receiver_ = var;
   }
 
-  if (is_function_scope()) {
-    if (!is_arrow_scope()) {
-      // Declare 'arguments' variable which exists in all non arrow functions.
-      // Note that it might never be accessed, in which case it won't be
-      // allocated during variable allocation.
-      variables_.Declare(this, ast_value_factory_->arguments_string(), VAR,
-                         Variable::ARGUMENTS, kCreatedInitialized);
-    }
+  if (is_function_scope() && !is_arrow_scope()) {
+    // Declare 'arguments' variable which exists in all non arrow functions.
+    // Note that it might never be accessed, in which case it won't be
+    // allocated during variable allocation.
+    variables_.Declare(this, ast_value_factory_->arguments_string(), VAR,
+                       Variable::ARGUMENTS, kCreatedInitialized);
 
-    if (subclass_constructor) {
-      DCHECK(!is_arrow_scope());
+    if (subclass_constructor || FLAG_harmony_new_target) {
       variables_.Declare(this, ast_value_factory_->new_target_string(), CONST,
                          Variable::NORMAL, kCreatedInitialized);
     }
 
     if (IsConciseMethod(function_kind_) || IsConstructor(function_kind_) ||
         IsAccessorFunction(function_kind_)) {
-      DCHECK(!is_arrow_scope());
       variables_.Declare(this, ast_value_factory_->this_function_string(),
                          CONST, Variable::NORMAL, kCreatedInitialized);
     }
@@ -343,7 +341,6 @@ void Scope::Initialize() {
 
 Scope* Scope::FinalizeBlockScope() {
   DCHECK(is_block_scope());
-  DCHECK(internals_.is_empty());
   DCHECK(temps_.is_empty());
   DCHECK(params_.is_empty());
 
@@ -391,27 +388,32 @@ Variable* Scope::LookupLocal(const AstRawString* name) {
 
   // Check context slot lookup.
   VariableMode mode;
-  Variable::Location location = Variable::CONTEXT;
+  VariableLocation location;
   InitializationFlag init_flag;
   MaybeAssignedFlag maybe_assigned_flag;
-  int index = ScopeInfo::ContextSlotIndex(scope_info_, name_handle, &mode,
-                                          &init_flag, &maybe_assigned_flag);
+  int index =
+      ScopeInfo::ContextSlotIndex(scope_info_, name_handle, &mode, &location,
+                                  &init_flag, &maybe_assigned_flag);
   if (index < 0) {
     // Check parameters.
     index = scope_info_->ParameterIndex(*name_handle);
     if (index < 0) return NULL;
 
     mode = DYNAMIC;
-    location = Variable::LOOKUP;
+    location = VariableLocation::LOOKUP;
     init_flag = kCreatedInitialized;
     // Be conservative and flag parameters as maybe assigned. Better information
     // would require ScopeInfo to serialize the maybe_assigned bit also for
     // parameters.
     maybe_assigned_flag = kMaybeAssigned;
+  } else {
+    DCHECK(location != VariableLocation::GLOBAL ||
+           (is_script_scope() && IsDeclaredVariableMode(mode) &&
+            !IsLexicalVariableMode(mode)));
   }
 
   Variable::Kind kind = Variable::NORMAL;
-  if (location == Variable::CONTEXT &&
+  if (location == VariableLocation::CONTEXT &&
       index == scope_info_->ReceiverContextSlotIndex()) {
     kind = Variable::THIS;
   }
@@ -440,7 +442,7 @@ Variable* Scope::LookupFunctionVar(const AstRawString* name,
     VariableDeclaration* declaration = factory->NewVariableDeclaration(
         proxy, mode, this, RelocInfo::kNoPosition);
     DeclareFunctionVar(declaration);
-    var->AllocateTo(Variable::CONTEXT, index);
+    var->AllocateTo(VariableLocation::CONTEXT, index);
     return var;
   } else {
     return NULL;
@@ -463,15 +465,20 @@ Variable* Scope::DeclareParameter(const AstRawString* name, VariableMode mode,
                                   bool is_rest, bool* is_duplicate) {
   DCHECK(!already_resolved());
   DCHECK(is_function_scope());
-  Variable* var = variables_.Declare(this, name, mode, Variable::NORMAL,
-                                     kCreatedInitialized);
+  Variable* var;
+  if (mode == TEMPORARY) {
+    var = NewTemporary(name);
+  } else {
+    var = variables_.Declare(this, name, mode, Variable::NORMAL,
+                             kCreatedInitialized);
+    // TODO(wingo): Avoid O(n^2) check.
+    *is_duplicate = IsDeclaredParameter(name);
+  }
   if (is_rest) {
     DCHECK_NULL(rest_parameter_);
     rest_parameter_ = var;
     rest_index_ = num_parameters();
   }
-  // TODO(wingo): Avoid O(n^2) check.
-  *is_duplicate = IsDeclaredParameter(name);
   params_.Add(var, zone());
   return var;
 }
@@ -483,8 +490,8 @@ Variable* Scope::DeclareLocal(const AstRawString* name, VariableMode mode,
                               int declaration_group_start) {
   DCHECK(!already_resolved());
   // This function handles VAR, LET, and CONST modes.  DYNAMIC variables are
-  // introduces during variable allocation, INTERNAL variables are allocated
-  // explicitly, and TEMPORARY variables are allocated via NewTemporary().
+  // introduces during variable allocation, and TEMPORARY variables are
+  // allocated via NewTemporary().
   DCHECK(IsDeclaredVariableMode(mode));
   ++num_var_or_const_;
   return variables_.Declare(this, name, mode, kind, init_flag,
@@ -514,26 +521,15 @@ void Scope::RemoveUnresolved(VariableProxy* var) {
 }
 
 
-Variable* Scope::NewInternal(const AstRawString* name) {
-  DCHECK(!already_resolved());
-  Variable* var = new(zone()) Variable(this,
-                                       name,
-                                       INTERNAL,
-                                       Variable::NORMAL,
-                                       kCreatedInitialized);
-  internals_.Add(var, zone());
-  return var;
-}
-
-
 Variable* Scope::NewTemporary(const AstRawString* name) {
   DCHECK(!already_resolved());
-  Variable* var = new(zone()) Variable(this,
+  Scope* scope = this->ClosureScope();
+  Variable* var = new(zone()) Variable(scope,
                                        name,
                                        TEMPORARY,
                                        Variable::NORMAL,
                                        kCreatedInitialized);
-  temps_.Add(var, zone());
+  scope->temps_.Add(var, zone());
   return var;
 }
 
@@ -562,12 +558,21 @@ Declaration* Scope::CheckConflictingVarDeclarations() {
   int length = decls_.length();
   for (int i = 0; i < length; i++) {
     Declaration* decl = decls_[i];
-    if (decl->mode() != VAR) continue;
+    if (decl->mode() != VAR && !is_block_scope()) continue;
     const AstRawString* name = decl->proxy()->raw_name();
 
     // Iterate through all scopes until and including the declaration scope.
+    // If the declaration scope is a (declaration) block scope, also continue
+    // (that is to handle the special inner scope of functions with
+    // destructuring parameters, which may not shadow any variables from
+    // the surrounding function scope).
     Scope* previous = NULL;
     Scope* current = decl->scope();
+    // Lexical vs lexical conflicts within the same scope have already been
+    // captured in Parser::Declare. The only conflicts we still need to check
+    // are lexical vs VAR, or any declarations within a declaration block scope
+    // vs lexical declarations in its surrounding (function) scope.
+    if (decl->mode() != VAR) current = current->outer_scope_;
     do {
       // There is a conflict if there exists a non-VAR binding.
       Variable* other_var = current->variables_.Lookup(name);
@@ -576,7 +581,7 @@ Declaration* Scope::CheckConflictingVarDeclarations() {
       }
       previous = current;
       current = current->outer_scope_;
-    } while (!previous->is_declaration_scope());
+    } while (!previous->is_declaration_scope() || previous->is_block_scope());
   }
   return NULL;
 }
@@ -599,18 +604,11 @@ class VarAndOrder {
 
 void Scope::CollectStackAndContextLocals(
     ZoneList<Variable*>* stack_locals, ZoneList<Variable*>* context_locals,
+    ZoneList<Variable*>* context_globals,
     ZoneList<Variable*>* strong_mode_free_variables) {
   DCHECK(stack_locals != NULL);
   DCHECK(context_locals != NULL);
-
-  // Collect internals which are always allocated on the heap.
-  for (int i = 0; i < internals_.length(); i++) {
-    Variable* var = internals_[i];
-    if (var->is_used()) {
-      DCHECK(var->IsContextSlot());
-      context_locals->Add(var, zone());
-    }
-  }
+  DCHECK(context_globals != NULL);
 
   // Collect temporaries which are always allocated on the stack, unless the
   // context as a whole has forced context allocation.
@@ -620,9 +618,10 @@ void Scope::CollectStackAndContextLocals(
       if (var->IsContextSlot()) {
         DCHECK(has_forced_context_allocation());
         context_locals->Add(var, zone());
-      } else {
-        DCHECK(var->IsStackLocal());
+      } else if (var->IsStackLocal()) {
         stack_locals->Add(var, zone());
+      } else {
+        DCHECK(var->IsParameter());
       }
     }
   }
@@ -650,6 +649,8 @@ void Scope::CollectStackAndContextLocals(
       stack_locals->Add(var, zone());
     } else if (var->IsContextSlot()) {
       context_locals->Add(var, zone());
+    } else if (var->IsGlobalSlot()) {
+      context_globals->Add(var, zone());
     }
   }
 }
@@ -689,7 +690,8 @@ bool Scope::HasTrivialContext() const {
   for (const Scope* scope = this; scope != NULL; scope = scope->outer_scope_) {
     if (scope->is_eval_scope()) return false;
     if (scope->scope_inside_with_) return false;
-    if (scope->num_heap_slots_ > 0) return false;
+    if (scope->ContextLocalCount() > 0) return false;
+    if (scope->ContextGlobalCount() > 0) return false;
   }
   return true;
 }
@@ -705,28 +707,18 @@ bool Scope::HasTrivialOuterContext() const {
 }
 
 
-bool Scope::HasLazyCompilableOuterContext() const {
-  Scope* outer = outer_scope_;
-  if (outer == NULL) return true;
-  // We have to prevent lazy compilation if this scope is inside a with scope
-  // and all declaration scopes between them have empty contexts. Such
-  // declaration scopes may become invisible during scope info deserialization.
-  outer = outer->DeclarationScope();
-  bool found_non_trivial_declarations = false;
-  for (const Scope* scope = outer; scope != NULL; scope = scope->outer_scope_) {
-    if (scope->is_with_scope() && !found_non_trivial_declarations) return false;
-    if (scope->is_block_scope() && !scope->decls_.is_empty()) return false;
-    if (scope->is_declaration_scope() && scope->num_heap_slots() > 0) {
-      found_non_trivial_declarations = true;
-    }
+bool Scope::AllowsLazyParsing() const {
+  // If we are inside a block scope, we must parse eagerly to find out how
+  // to allocate variables on the block scope. At this point, declarations may
+  // not have yet been parsed.
+  for (const Scope* scope = this; scope != NULL; scope = scope->outer_scope_) {
+    if (scope->is_block_scope()) return false;
   }
-  return true;
+  return AllowsLazyCompilation();
 }
 
 
-bool Scope::AllowsLazyCompilation() const {
-  return !force_eager_compilation_ && HasLazyCompilableOuterContext();
-}
+bool Scope::AllowsLazyCompilation() const { return !force_eager_compilation_; }
 
 
 bool Scope::AllowsLazyCompilationWithoutContext() const {
@@ -747,15 +739,6 @@ int Scope::ContextChainLength(Scope* scope) {
 }
 
 
-Scope* Scope::ScriptScope() {
-  Scope* scope = this;
-  while (!scope->is_script_scope()) {
-    scope = scope->outer_scope();
-  }
-  return scope;
-}
-
-
 Scope* Scope::DeclarationScope() {
   Scope* scope = this;
   while (!scope->is_declaration_scope()) {
@@ -763,6 +746,26 @@ Scope* Scope::DeclarationScope() {
   }
   return scope;
 }
+
+
+Scope* Scope::ClosureScope() {
+  Scope* scope = this;
+  while (!scope->is_declaration_scope() || scope->is_block_scope()) {
+    scope = scope->outer_scope();
+  }
+  return scope;
+}
+
+
+Scope* Scope::ReceiverScope() {
+  Scope* scope = this;
+  while (!scope->is_script_scope() &&
+         (!scope->is_function_scope() || scope->is_arrow_scope())) {
+    scope = scope->outer_scope();
+  }
+  return scope;
+}
+
 
 
 Handle<ScopeInfo> Scope::GetScopeInfo(Isolate* isolate) {
@@ -834,18 +837,21 @@ static void PrintName(const AstRawString* name) {
 
 static void PrintLocation(Variable* var) {
   switch (var->location()) {
-    case Variable::UNALLOCATED:
+    case VariableLocation::UNALLOCATED:
       break;
-    case Variable::PARAMETER:
+    case VariableLocation::PARAMETER:
       PrintF("parameter[%d]", var->index());
       break;
-    case Variable::LOCAL:
+    case VariableLocation::LOCAL:
       PrintF("local[%d]", var->index());
       break;
-    case Variable::CONTEXT:
+    case VariableLocation::CONTEXT:
       PrintF("context[%d]", var->index());
       break;
-    case Variable::LOOKUP:
+    case VariableLocation::GLOBAL:
+      PrintF("global[%d]", var->index());
+      break;
+    case VariableLocation::LOOKUP:
       PrintF("lookup");
       break;
   }
@@ -856,7 +862,10 @@ static void PrintVar(int indent, Variable* var) {
   if (var->is_used() || !var->IsUnallocated()) {
     Indent(indent, Variable::Mode2String(var->mode()));
     PrintF(" ");
-    PrintName(var->raw_name());
+    if (var->raw_name()->IsEmpty())
+      PrintF(".%p", reinterpret_cast<void*>(var));
+    else
+      PrintName(var->raw_name());
     PrintF(";  // ");
     PrintLocation(var);
     bool comma = !var->IsUnallocated();
@@ -877,7 +886,11 @@ static void PrintVar(int indent, Variable* var) {
 static void PrintMap(int indent, VariableMap* map) {
   for (VariableMap::Entry* p = map->Start(); p != NULL; p = map->Next(p)) {
     Variable* var = reinterpret_cast<Variable*>(p->value);
-    PrintVar(indent, var);
+    if (var == NULL) {
+      Indent(indent, "<?>\n");
+    } else {
+      PrintVar(indent, var);
+    }
   }
 }
 
@@ -898,7 +911,11 @@ void Scope::Print(int n) {
     PrintF(" (");
     for (int i = 0; i < params_.length(); i++) {
       if (i > 0) PrintF(", ");
-      PrintName(params_[i]->raw_name());
+      const AstRawString* name = params_[i]->raw_name();
+      if (name->IsEmpty())
+        PrintF(".%p", reinterpret_cast<void*>(params_[i]));
+      else
+        PrintName(name);
     }
     PrintF(")");
   }
@@ -934,10 +951,15 @@ void Scope::Print(int n) {
     Indent(n1, "// outer scope calls 'eval' in sloppy context\n");
   }
   if (inner_scope_calls_eval_) Indent(n1, "// inner scope calls 'eval'\n");
-  if (num_stack_slots_ > 0) { Indent(n1, "// ");
-  PrintF("%d stack slots\n", num_stack_slots_); }
-  if (num_heap_slots_ > 0) { Indent(n1, "// ");
-  PrintF("%d heap slots\n", num_heap_slots_); }
+  if (num_stack_slots_ > 0) {
+    Indent(n1, "// ");
+    PrintF("%d stack slots\n", num_stack_slots_);
+  }
+  if (num_heap_slots_ > 0) {
+    Indent(n1, "// ");
+    PrintF("%d heap slots (including %d global slots)\n", num_heap_slots_,
+           num_global_slots_);
+  }
 
   // Print locals.
   if (function_ != NULL) {
@@ -949,13 +971,6 @@ void Scope::Print(int n) {
     Indent(n1, "// temporary vars:\n");
     for (int i = 0; i < temps_.length(); i++) {
       PrintVar(n1, temps_[i]);
-    }
-  }
-
-  if (internals_.length() > 0) {
-    Indent(n1, "// internal vars:\n");
-    for (int i = 0; i < internals_.length(); i++) {
-      PrintVar(n1, internals_[i]);
     }
   }
 
@@ -998,7 +1013,7 @@ Variable* Scope::NonLocal(const AstRawString* name, VariableMode mode) {
                        Variable::NORMAL,
                        init_flag);
     // Allocate it by giving it a dynamic lookup.
-    var->AllocateTo(Variable::LOOKUP, -1);
+    var->AllocateTo(VariableLocation::LOOKUP, -1);
   }
   return var;
 }
@@ -1236,7 +1251,6 @@ ClassVariable* Scope::ClassVariableForMethod() const {
     return nullptr;
   }
   DCHECK_NOT_NULL(outer_scope_);
-  DCHECK(outer_scope_->is_class_scope());
   // The class scope contains at most one variable, the class name.
   DCHECK(outer_scope_->variables_.occupancy() <= 1);
   if (outer_scope_->variables_.occupancy() == 0) return nullptr;
@@ -1325,7 +1339,6 @@ bool Scope::MustAllocateInContext(Variable* var) {
   // always context-allocated.
   if (has_forced_context_allocation()) return true;
   if (var->mode() == TEMPORARY) return false;
-  if (var->mode() == INTERNAL) return true;
   if (is_catch_scope() || is_module_scope()) return true;
   if (is_script_scope() && IsLexicalVariableMode(var->mode())) return true;
   return var->has_forced_context_allocation() ||
@@ -1348,15 +1361,15 @@ bool Scope::HasArgumentsParameter(Isolate* isolate) {
 
 void Scope::AllocateStackSlot(Variable* var) {
   if (is_block_scope()) {
-    DeclarationScope()->AllocateStackSlot(var);
+    outer_scope()->DeclarationScope()->AllocateStackSlot(var);
   } else {
-    var->AllocateTo(Variable::LOCAL, num_stack_slots_++);
+    var->AllocateTo(VariableLocation::LOCAL, num_stack_slots_++);
   }
 }
 
 
 void Scope::AllocateHeapSlot(Variable* var) {
-  var->AllocateTo(Variable::CONTEXT, num_heap_slots_++);
+  var->AllocateTo(VariableLocation::CONTEXT, num_heap_slots_++);
 }
 
 
@@ -1421,9 +1434,11 @@ void Scope::AllocateParameter(Variable* var, int index) {
     } else {
       DCHECK(var->IsUnallocated() || var->IsParameter());
       if (var->IsUnallocated()) {
-        var->AllocateTo(Variable::PARAMETER, index);
+        var->AllocateTo(VariableLocation::PARAMETER, index);
       }
     }
+  } else {
+    DCHECK(!var->IsGlobalSlot());
   }
 }
 
@@ -1454,14 +1469,28 @@ void Scope::AllocateNonParameterLocal(Isolate* isolate, Variable* var) {
 }
 
 
-void Scope::AllocateNonParameterLocals(Isolate* isolate) {
+void Scope::AllocateDeclaredGlobal(Isolate* isolate, Variable* var) {
+  DCHECK(var->scope() == this);
+  DCHECK(!var->IsVariable(isolate->factory()->dot_result_string()) ||
+         !var->IsStackLocal());
+  if (var->IsUnallocated()) {
+    if (var->IsStaticGlobalObjectProperty()) {
+      DCHECK_EQ(-1, var->index());
+      DCHECK(var->name()->IsString());
+      var->AllocateTo(VariableLocation::GLOBAL, num_heap_slots_++);
+      num_global_slots_++;
+    } else {
+      // There must be only DYNAMIC_GLOBAL in the script scope.
+      DCHECK(!is_script_scope() || DYNAMIC_GLOBAL == var->mode());
+    }
+  }
+}
+
+
+void Scope::AllocateNonParameterLocalsAndDeclaredGlobals(Isolate* isolate) {
   // All variables that have no rewrite yet are non-parameter locals.
   for (int i = 0; i < temps_.length(); i++) {
     AllocateNonParameterLocal(isolate, temps_[i]);
-  }
-
-  for (int i = 0; i < internals_.length(); i++) {
-    AllocateNonParameterLocal(isolate, internals_[i]);
   }
 
   ZoneList<VarAndOrder> vars(variables_.occupancy(), zone());
@@ -1475,6 +1504,12 @@ void Scope::AllocateNonParameterLocals(Isolate* isolate) {
   int var_count = vars.length();
   for (int i = 0; i < var_count; i++) {
     AllocateNonParameterLocal(isolate, vars[i].var());
+  }
+
+  if (FLAG_global_var_shortcuts) {
+    for (int i = 0; i < var_count; i++) {
+      AllocateDeclaredGlobal(isolate, vars[i].var());
+    }
   }
 
   // For now, function_ must be allocated at the very end.  If it gets
@@ -1522,7 +1557,7 @@ void Scope::AllocateVariablesRecursively(Isolate* isolate) {
   // Parameters must be allocated first, if any.
   if (is_function_scope()) AllocateParameterLocals(isolate);
   if (has_this_declaration()) AllocateReceiver();
-  AllocateNonParameterLocals(isolate);
+  AllocateNonParameterLocalsAndDeclaredGlobals(isolate);
 
   // Force allocation of a context for this scope if necessary. For a 'with'
   // scope and for a function scope that makes an 'eval' call we need a context,
@@ -1551,7 +1586,8 @@ void Scope::AllocateModules() {
       DCHECK(!scope->already_resolved());
       DCHECK(scope->module_descriptor_->IsFrozen());
       DCHECK_NULL(scope->module_var_);
-      scope->module_var_ = NewInternal(ast_value_factory_->dot_module_string());
+      scope->module_var_ =
+          NewTemporary(ast_value_factory_->dot_module_string());
       ++num_modules_;
     }
   }
@@ -1566,8 +1602,14 @@ int Scope::StackLocalCount() const {
 
 int Scope::ContextLocalCount() const {
   if (num_heap_slots() == 0) return 0;
-  return num_heap_slots() - Context::MIN_CONTEXT_SLOTS -
-      (function_ != NULL && function_->proxy()->var()->IsContextSlot() ? 1 : 0);
+  bool is_function_var_in_context =
+      function_ != NULL && function_->proxy()->var()->IsContextSlot();
+  return num_heap_slots() - Context::MIN_CONTEXT_SLOTS - num_global_slots() -
+         (is_function_var_in_context ? 1 : 0);
 }
+
+
+int Scope::ContextGlobalCount() const { return num_global_slots(); }
+
 }  // namespace internal
 }  // namespace v8

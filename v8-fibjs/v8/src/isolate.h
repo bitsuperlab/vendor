@@ -6,15 +6,19 @@
 #define V8_ISOLATE_H_
 
 #include <queue>
+#include <set>
+
 #include "include/v8-debug.h"
 #include "src/allocation.h"
 #include "src/assert-scope.h"
 #include "src/base/atomicops.h"
 #include "src/builtins.h"
+#include "src/cancelable-task.h"
 #include "src/contexts.h"
 #include "src/date.h"
 #include "src/execution.h"
 #include "src/frames.h"
+#include "src/futex-emulation.h"
 #include "src/global-handles.h"
 #include "src/handles.h"
 #include "src/hashmap.h"
@@ -79,11 +83,13 @@ typedef void* ExternalReferenceRedirectorPointer();
 
 
 class Debug;
-class Debugger;
 class PromiseOnStack;
 class Redirection;
 class Simulator;
 
+namespace interpreter {
+class Interpreter;
+}
 
 // Static indirection table for handles to constants.  If a frame
 // element represents a constant, the data contains an index into
@@ -378,7 +384,6 @@ typedef List<HeapObject*> DebugObjectCache;
   V(uint32_t, per_isolate_assert_data, 0xFFFFFFFFu)                            \
   V(PromiseRejectCallback, promise_reject_callback, NULL)                      \
   V(const v8::StartupData*, snapshot_blob, NULL)                               \
-  V(bool, creating_default_snapshot, false)                                    \
   ISOLATE_INIT_SIMULATOR_LIST(V)
 
 #define THREAD_LOCAL_TOP_ACCESSOR(type, name)                        \
@@ -886,6 +891,7 @@ class Isolate {
     return handle_scope_implementer_;
   }
   Zone* runtime_zone() { return &runtime_zone_; }
+  Zone* interface_descriptor_zone() { return &interface_descriptor_zone_; }
 
   UnicodeCache* unicode_cache() {
     return unicode_cache_;
@@ -900,8 +906,6 @@ class Isolate {
   EternalHandles* eternal_handles() { return eternal_handles_; }
 
   ThreadManager* thread_manager() { return thread_manager_; }
-
-  StringTracker* string_tracker() { return string_tracker_; }
 
   unibrow::Mapping<unibrow::Ecma262UnCanonicalize>* jsregexp_uncanonicalize() {
     return &jsregexp_uncanonicalize_;
@@ -1129,6 +1133,11 @@ class Isolate {
     return array_buffer_allocator_;
   }
 
+  FutexWaitListNode* futex_wait_list_node() { return &futex_wait_list_node_; }
+
+  void RegisterCancelableTask(Cancelable* task);
+  void RemoveCancelableTask(Cancelable* task);
+
  protected:
   explicit Isolate(bool enable_serializer);
 
@@ -1271,6 +1280,7 @@ class Isolate {
   HandleScopeImplementer* handle_scope_implementer_;
   UnicodeCache* unicode_cache_;
   Zone runtime_zone_;
+  Zone interface_descriptor_zone_;
   InnerPointerToCodeCache* inner_pointer_to_code_cache_;
   GlobalHandles* global_handles_;
   EternalHandles* eternal_handles_;
@@ -1278,7 +1288,6 @@ class Isolate {
   RuntimeState runtime_state_;
   Builtins builtins_;
   bool has_installed_extensions_;
-  StringTracker* string_tracker_;
   unibrow::Mapping<unibrow::Ecma262UnCanonicalize> jsregexp_uncanonicalize_;
   unibrow::Mapping<unibrow::CanonicalizationRange> jsregexp_canonrange_;
   unibrow::Mapping<unibrow::Ecma262Canonicalize>
@@ -1314,6 +1323,8 @@ class Isolate {
   CpuProfiler* cpu_profiler_;
   HeapProfiler* heap_profiler_;
   FunctionEntryHook function_entry_hook_;
+
+  interpreter::Interpreter* interpreter_;
 
   typedef std::pair<InterruptCallback, void*> InterruptEntry;
   std::queue<InterruptEntry> api_interrupts_queue_;
@@ -1360,6 +1371,10 @@ class Isolate {
   List<Object*> partial_snapshot_cache_;
 
   v8::ArrayBuffer::Allocator* array_buffer_allocator_;
+
+  FutexWaitListNode futex_wait_list_node_;
+
+  std::set<Cancelable*> cancelable_tasks_;
 
   friend class ExecutionAccess;
   friend class HandleScopeImplementer;
@@ -1479,7 +1494,7 @@ class StackLimitCheck BASE_EMBEDDED {
   }
 
   // Use this to check for stack-overflow when entering runtime from JS code.
-  bool JsHasOverflowed() const;
+  bool JsHasOverflowed(uintptr_t gap = 0) const;
 
  private:
   Isolate* isolate_;

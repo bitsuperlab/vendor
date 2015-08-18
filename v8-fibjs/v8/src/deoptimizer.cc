@@ -9,7 +9,7 @@
 #include "src/cpu-profiler.h"
 #include "src/deoptimizer.h"
 #include "src/disasm.h"
-#include "src/full-codegen.h"
+#include "src/full-codegen/full-codegen.h"
 #include "src/global-handles.h"
 #include "src/macro-assembler.h"
 #include "src/prettyprinter.h"
@@ -154,8 +154,11 @@ DeoptimizedFrameInfo* Deoptimizer::DebuggerInspectableFrame(
   // Always use the actual stack slots when calculating the fp to sp
   // delta adding two for the function and context.
   unsigned stack_slots = code->stack_slots();
+  unsigned arguments_stack_height =
+      Deoptimizer::ComputeOutgoingArgumentSize(code, deoptimization_index);
   unsigned fp_to_sp_delta = (stack_slots * kPointerSize) +
-      StandardFrameConstants::kFixedFrameSizeFromFp;
+                            StandardFrameConstants::kFixedFrameSizeFromFp +
+                            arguments_stack_height;
 
   Deoptimizer* deoptimizer = new Deoptimizer(isolate,
                                              function,
@@ -450,28 +453,6 @@ void Deoptimizer::DeoptimizeMarkedCode(Isolate* isolate) {
     Context* native_context = Context::cast(context);
     DeoptimizeMarkedCodeForContext(native_context);
     context = native_context->get(Context::NEXT_CONTEXT_LINK);
-  }
-}
-
-
-void Deoptimizer::DeoptimizeGlobalObject(JSObject* object) {
-  if (FLAG_trace_deopt) {
-    CodeTracer::Scope scope(object->GetHeap()->isolate()->GetCodeTracer());
-    PrintF(scope.file(), "[deoptimize global object @ 0x%08" V8PRIxPTR "]\n",
-        reinterpret_cast<intptr_t>(object));
-  }
-  if (object->IsJSGlobalProxy()) {
-    PrototypeIterator iter(object->GetIsolate(), object);
-    // TODO(verwaest): This CHECK will be hit if the global proxy is detached.
-    CHECK(iter.GetCurrent()->IsJSGlobalObject());
-    Context* native_context =
-        GlobalObject::cast(iter.GetCurrent())->native_context();
-    MarkAllCodeForContext(native_context);
-    DeoptimizeMarkedCodeForContext(native_context);
-  } else if (object->IsGlobalObject()) {
-    Context* native_context = GlobalObject::cast(object)->native_context();
-    MarkAllCodeForContext(native_context);
-    DeoptimizeMarkedCodeForContext(native_context);
   }
 }
 
@@ -1241,6 +1222,12 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslationIterator* iterator,
   output_frame->SetFrameSlot(output_offset, value);
   DebugPrintOutputSlot(value, frame_index, output_offset, "code object\n");
 
+  // The allocation site.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(isolate_->heap()->undefined_value());
+  output_frame->SetFrameSlot(output_offset, value);
+  DebugPrintOutputSlot(value, frame_index, output_offset, "allocation site\n");
+
   // Number of incoming arguments.
   output_offset -= kPointerSize;
   value = reinterpret_cast<intptr_t>(Smi::FromInt(height - 1));
@@ -1250,13 +1237,11 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslationIterator* iterator,
     PrintF(trace_scope_->file(), "(%d)\n", height - 1);
   }
 
-  // Constructor function being invoked by the stub (only present on some
-  // architectures, indicated by kConstructorOffset).
-  if (ConstructFrameConstants::kConstructorOffset != kMinInt) {
-    output_offset -= kPointerSize;
-    WriteValueToOutput(function, 0, frame_index, output_offset,
-                       "constructor function    ");
-  }
+  // The original constructor.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(isolate_->heap()->undefined_value());
+  output_frame->SetFrameSlot(output_offset, value);
+  DebugPrintOutputSlot(value, frame_index, output_offset, "new.target\n");
 
   // The newly allocated object was passed as receiver in the artificial
   // constructor stub environment created by HEnvironment::CopyForInlining().
@@ -1439,6 +1424,9 @@ void Deoptimizer::DoComputeCompiledStubFrame(TranslationIterator* iterator,
   //                                         reg = saved frame
   //                                         reg = JSFunction context
   //
+  // Caller stack params contain the register parameters to the stub first,
+  // and then, if the descriptor specifies a constant number of stack
+  // parameters, the stack parameters as well.
 
   TranslatedFrame* translated_frame =
       &(translated_state_.frames()[frame_index]);
@@ -1453,12 +1441,13 @@ void Deoptimizer::DoComputeCompiledStubFrame(TranslationIterator* iterator,
   // and the standard stack frame slots.  Include space for an argument
   // object to the callee and optionally the space to pass the argument
   // object to the stub failure handler.
-  int param_count = descriptor.GetEnvironmentParameterCount();
+  int param_count = descriptor.GetRegisterParameterCount();
+  int stack_param_count = descriptor.GetStackParameterCount();
   CHECK_EQ(translated_frame->height(), param_count);
   CHECK_GE(param_count, 0);
 
-  int height_in_bytes = kPointerSize * param_count + sizeof(Arguments) +
-      kPointerSize;
+  int height_in_bytes = kPointerSize * (param_count + stack_param_count) +
+                        sizeof(Arguments) + kPointerSize;
   int fixed_frame_size = StandardFrameConstants::kFixedFrameSize;
   int input_frame_size = input_->GetFrameSize();
   int output_frame_size = height_in_bytes + fixed_frame_size;
@@ -1531,7 +1520,7 @@ void Deoptimizer::DoComputeCompiledStubFrame(TranslationIterator* iterator,
   DebugPrintOutputSlot(value, frame_index, output_frame_offset,
                        "function (stub failure sentinel)\n");
 
-  intptr_t caller_arg_count = 0;
+  intptr_t caller_arg_count = stack_param_count;
   bool arg_count_known = !descriptor.stack_parameter_count().is_valid();
 
   // Build the Arguments object for the caller's parameters and a pointer to it.
@@ -1572,9 +1561,25 @@ void Deoptimizer::DoComputeCompiledStubFrame(TranslationIterator* iterator,
     WriteTranslatedValueToOutput(&value_iterator, &input_index, 0,
                                  output_frame_offset);
 
-    if (!arg_count_known && descriptor.IsEnvironmentParameterCountRegister(i)) {
+    if (!arg_count_known &&
+        descriptor.GetRegisterParameter(i)
+            .is(descriptor.stack_parameter_count())) {
       arguments_length_offset = output_frame_offset;
     }
+  }
+
+  // Copy constant stack parameters to the failure frame. If the number of stack
+  // parameters is not known in the descriptor, the arguments object is the way
+  // to access them.
+  for (int i = 0; i < stack_param_count; i++) {
+    output_frame_offset -= kPointerSize;
+    Object** stack_parameter = reinterpret_cast<Object**>(
+        frame_ptr + StandardFrameConstants::kCallerSPOffset +
+        (stack_param_count - i - 1) * kPointerSize);
+    value = reinterpret_cast<intptr_t>(*stack_parameter);
+    output_frame->SetFrameSlot(output_frame_offset, value);
+    DebugPrintOutputSlot(value, frame_index, output_frame_offset,
+                         "stack parameter\n");
   }
 
   CHECK_EQ(0u, output_frame_offset);
@@ -1606,8 +1611,8 @@ void Deoptimizer::DoComputeCompiledStubFrame(TranslationIterator* iterator,
   // Compute this frame's PC, state, and continuation.
   Code* trampoline = NULL;
   StubFunctionMode function_mode = descriptor.function_mode();
-  StubFailureTrampolineStub(isolate_,
-                            function_mode).FindCodeInCache(&trampoline);
+  StubFailureTrampolineStub(isolate_, function_mode)
+      .FindCodeInCache(&trampoline);
   DCHECK(trampoline != NULL);
   output_frame->SetPc(reinterpret_cast<intptr_t>(
       trampoline->instruction_start()));
@@ -1768,7 +1773,8 @@ unsigned Deoptimizer::ComputeInputFrameSize() const {
                     StandardFrameConstants::kFixedFrameSizeFromFp;
   if (compiled_code_->kind() == Code::OPTIMIZED_FUNCTION) {
     unsigned stack_slots = compiled_code_->stack_slots();
-    unsigned outgoing_size = ComputeOutgoingArgumentSize();
+    unsigned outgoing_size =
+        ComputeOutgoingArgumentSize(compiled_code_, bailout_id_);
     CHECK(result == fixed_size + (stack_slots * kPointerSize) + outgoing_size);
   }
   return result;
@@ -1796,10 +1802,12 @@ unsigned Deoptimizer::ComputeIncomingArgumentSize(JSFunction* function) const {
 }
 
 
-unsigned Deoptimizer::ComputeOutgoingArgumentSize() const {
+// static
+unsigned Deoptimizer::ComputeOutgoingArgumentSize(Code* code,
+                                                  unsigned bailout_id) {
   DeoptimizationInputData* data =
-      DeoptimizationInputData::cast(compiled_code_->deoptimization_data());
-  unsigned height = data->ArgumentsStackHeight(bailout_id_)->value();
+      DeoptimizationInputData::cast(code->deoptimization_data());
+  unsigned height = data->ArgumentsStackHeight(bailout_id)->value();
   return height * kPointerSize;
 }
 
@@ -2264,7 +2272,12 @@ DeoptimizedFrameInfo::DeoptimizedFrameInfo(Deoptimizer* deoptimizer,
   source_position_ = code->SourcePosition(pc);
 
   for (int i = 0; i < expression_count_; i++) {
-    SetExpression(i, output_frame->GetExpression(i));
+    Object* value = output_frame->GetExpression(i);
+    // Replace materialization markers with the undefined value.
+    if (value == deoptimizer->isolate()->heap()->arguments_marker()) {
+      value = deoptimizer->isolate()->heap()->undefined_value();
+    }
+    SetExpression(i, value);
   }
 
   if (has_arguments_adaptor) {
@@ -2275,7 +2288,12 @@ DeoptimizedFrameInfo::DeoptimizedFrameInfo(Deoptimizer* deoptimizer,
   parameters_count_ = output_frame->ComputeParametersCount();
   parameters_ = new Object* [parameters_count_];
   for (int i = 0; i < parameters_count_; i++) {
-    SetParameter(i, output_frame->GetParameter(i));
+    Object* value = output_frame->GetParameter(i);
+    // Replace materialization markers with the undefined value.
+    if (value == deoptimizer->isolate()->heap()->arguments_marker()) {
+      value = deoptimizer->isolate()->heap()->undefined_value();
+    }
+    SetParameter(i, value);
   }
 }
 
@@ -2708,7 +2726,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
           SharedFunctionInfo::cast(literal_array->get(iterator->Next()));
       int height = iterator->Next();
       if (trace_file != nullptr) {
-        SmartArrayPointer<char> name = shared_info->DebugName()->ToCString();
+        base::SmartArrayPointer<char> name =
+            shared_info->DebugName()->ToCString();
         PrintF(trace_file, "  reading input frame %s", name.get());
         int arg_count = shared_info->internal_formal_parameter_count() + 1;
         PrintF(trace_file, " => node=%d, args=%d, height=%d; inputs:\n",
@@ -2722,7 +2741,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
           SharedFunctionInfo::cast(literal_array->get(iterator->Next()));
       int height = iterator->Next();
       if (trace_file != nullptr) {
-        SmartArrayPointer<char> name = shared_info->DebugName()->ToCString();
+        base::SmartArrayPointer<char> name =
+            shared_info->DebugName()->ToCString();
         PrintF(trace_file, "  reading arguments adaptor frame %s", name.get());
         PrintF(trace_file, " => height=%d; inputs:\n", height);
       }
@@ -2734,7 +2754,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
           SharedFunctionInfo::cast(literal_array->get(iterator->Next()));
       int height = iterator->Next();
       if (trace_file != nullptr) {
-        SmartArrayPointer<char> name = shared_info->DebugName()->ToCString();
+        base::SmartArrayPointer<char> name =
+            shared_info->DebugName()->ToCString();
         PrintF(trace_file, "  reading construct stub frame %s", name.get());
         PrintF(trace_file, " => height=%d; inputs:\n", height);
       }
@@ -2745,7 +2766,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
       SharedFunctionInfo* shared_info =
           SharedFunctionInfo::cast(literal_array->get(iterator->Next()));
       if (trace_file != nullptr) {
-        SmartArrayPointer<char> name = shared_info->DebugName()->ToCString();
+        base::SmartArrayPointer<char> name =
+            shared_info->DebugName()->ToCString();
         PrintF(trace_file, "  reading getter frame %s; inputs:\n", name.get());
       }
       return TranslatedFrame::AccessorFrame(TranslatedFrame::kGetter,
@@ -2756,7 +2778,8 @@ TranslatedFrame TranslatedState::CreateNextTranslatedFrame(
       SharedFunctionInfo* shared_info =
           SharedFunctionInfo::cast(literal_array->get(iterator->Next()));
       if (trace_file != nullptr) {
-        SmartArrayPointer<char> name = shared_info->DebugName()->ToCString();
+        base::SmartArrayPointer<char> name =
+            shared_info->DebugName()->ToCString();
         PrintF(trace_file, "  reading setter frame %s; inputs:\n", name.get());
       }
       return TranslatedFrame::AccessorFrame(TranslatedFrame::kSetter,
@@ -2966,7 +2989,7 @@ TranslatedValue TranslatedState::CreateNextTranslatedValue(
 
     case Translation::DOUBLE_STACK_SLOT: {
       int slot_offset = SlotOffsetFp(iterator->Next());
-      double value = *(reinterpret_cast<double*>(fp + slot_offset));
+      double value = ReadDoubleValue(fp + slot_offset);
       if (trace_file != nullptr) {
         PrintF(trace_file, "%e ; (double) [fp %c %d] ", value,
                slot_offset < 0 ? '-' : '+', std::abs(slot_offset));
@@ -3191,7 +3214,7 @@ Handle<Object> TranslatedState::MaterializeAt(int frame_index,
         }
         case JS_OBJECT_TYPE: {
           Handle<JSObject> object =
-              isolate_->factory()->NewJSObjectFromMap(map, NOT_TENURED, false);
+              isolate_->factory()->NewJSObjectFromMap(map, NOT_TENURED);
           slot->value_ = object;
           Handle<Object> properties = MaterializeAt(frame_index, value_index);
           Handle<Object> elements = MaterializeAt(frame_index, value_index);

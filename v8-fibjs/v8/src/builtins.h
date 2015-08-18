@@ -72,6 +72,8 @@ enum BuiltinExtraArguments {
   V(JSConstructStubApi, BUILTIN, UNINITIALIZED, kNoExtraICState)             \
   V(JSEntryTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)              \
   V(JSConstructEntryTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)     \
+  V(InterpreterEntryTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)     \
+  V(InterpreterExitTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)      \
   V(CompileLazy, BUILTIN, UNINITIALIZED, kNoExtraICState)                    \
   V(CompileOptimized, BUILTIN, UNINITIALIZED, kNoExtraICState)               \
   V(CompileOptimizedConcurrent, BUILTIN, UNINITIALIZED, kNoExtraICState)     \
@@ -86,8 +88,10 @@ enum BuiltinExtraArguments {
   V(StoreIC_Miss, BUILTIN, UNINITIALIZED, kNoExtraICState)                   \
   V(KeyedStoreIC_Miss, BUILTIN, UNINITIALIZED, kNoExtraICState)              \
   V(LoadIC_Getter_ForDeopt, LOAD_IC, MONOMORPHIC, kNoExtraICState)           \
-  V(KeyedLoadIC_Initialize, KEYED_LOAD_IC, UNINITIALIZED, kNoExtraICState)   \
   V(KeyedLoadIC_Megamorphic, KEYED_LOAD_IC, MEGAMORPHIC, kNoExtraICState)    \
+                                                                             \
+  V(KeyedLoadIC_Megamorphic_Strong, KEYED_LOAD_IC, MEGAMORPHIC,              \
+    LoadICState::kStrongModeState)                                           \
                                                                              \
   V(StoreIC_Setter_ForDeopt, STORE_IC, MONOMORPHIC,                          \
     StoreICState::kStrictModeState)                                          \
@@ -104,7 +108,6 @@ enum BuiltinExtraArguments {
   V(KeyedStoreIC_Megamorphic_Strict, KEYED_STORE_IC, MEGAMORPHIC,            \
     StoreICState::kStrictModeState)                                          \
                                                                              \
-  /* Uses KeyedLoadIC_Initialize; must be after in list. */                  \
   V(FunctionCall, BUILTIN, UNINITIALIZED, kNoExtraICState)                   \
   V(FunctionApply, BUILTIN, UNINITIALIZED, kNoExtraICState)                  \
   V(ReflectApply, BUILTIN, UNINITIALIZED, kNoExtraICState)                   \
@@ -126,42 +129,23 @@ enum BuiltinExtraArguments {
   CODE_AGE_LIST_WITH_ARG(DECLARE_CODE_AGE_BUILTIN, V)
 
 // Define list of builtin handlers implemented in assembly.
-#define BUILTIN_LIST_H(V)                                               \
-  V(LoadIC_Slow,                    LOAD_IC)                            \
-  V(KeyedLoadIC_Slow,               KEYED_LOAD_IC)                      \
-  V(StoreIC_Slow,                   STORE_IC)                           \
-  V(KeyedStoreIC_Slow,              KEYED_STORE_IC)                     \
-  V(LoadIC_Normal,                  LOAD_IC)                            \
-  V(StoreIC_Normal,                 STORE_IC)
+#define BUILTIN_LIST_H(V)                    \
+  V(LoadIC_Slow,             LOAD_IC)        \
+  V(LoadIC_Slow_Strong,      LOAD_IC)        \
+  V(KeyedLoadIC_Slow,        KEYED_LOAD_IC)  \
+  V(KeyedLoadIC_Slow_Strong, KEYED_LOAD_IC)  \
+  V(StoreIC_Slow,            STORE_IC)       \
+  V(KeyedStoreIC_Slow,       KEYED_STORE_IC) \
+  V(LoadIC_Normal,           LOAD_IC)        \
+  V(LoadIC_Normal_Strong,    LOAD_IC)        \
+  V(StoreIC_Normal,          STORE_IC)
 
 // Define list of builtins used by the debugger implemented in assembly.
-#define BUILTIN_LIST_DEBUG_A(V)                                               \
-  V(Return_DebugBreak,                         BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(CallFunctionStub_DebugBreak,               BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(CallConstructStub_DebugBreak,              BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(CallConstructStub_Recording_DebugBreak,    BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(CallICStub_DebugBreak,                     CALL_IC, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(LoadIC_DebugBreak,                         LOAD_IC, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(KeyedLoadIC_DebugBreak,                    KEYED_LOAD_IC, DEBUG_STUB,     \
-                                               DEBUG_BREAK)                   \
-  V(StoreIC_DebugBreak,                        STORE_IC, DEBUG_STUB,          \
-                                               DEBUG_BREAK)                   \
-  V(KeyedStoreIC_DebugBreak,                   KEYED_STORE_IC, DEBUG_STUB,    \
-                                               DEBUG_BREAK)                   \
-  V(CompareNilIC_DebugBreak,                   COMPARE_NIL_IC, DEBUG_STUB,    \
-                                               DEBUG_BREAK)                   \
-  V(Slot_DebugBreak,                           BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(PlainReturn_LiveEdit,                      BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)                   \
-  V(FrameDropper_LiveEdit,                     BUILTIN, DEBUG_STUB,           \
-                                               DEBUG_BREAK)
+#define BUILTIN_LIST_DEBUG_A(V)                                 \
+  V(Return_DebugBreak, BUILTIN, DEBUG_STUB, kNoExtraICState)    \
+  V(Slot_DebugBreak, BUILTIN, DEBUG_STUB, kNoExtraICState)      \
+  V(PlainReturn_LiveEdit, BUILTIN, DEBUG_STUB, kNoExtraICState) \
+  V(FrameDropper_LiveEdit, BUILTIN, DEBUG_STUB, kNoExtraICState)
 
 // Define list of builtins implemented in JavaScript.
 #define BUILTINS_LIST_JS(V)                \
@@ -198,7 +182,6 @@ enum BuiltinExtraArguments {
   V(CALL_NON_FUNCTION_AS_CONSTRUCTOR, 0)   \
   V(CALL_FUNCTION_PROXY, 1)                \
   V(CALL_FUNCTION_PROXY_AS_CONSTRUCTOR, 1) \
-  V(TO_OBJECT, 0)                          \
   V(TO_NUMBER, 0)                          \
   V(TO_STRING, 0)                          \
   V(TO_NAME, 0)                            \
@@ -324,6 +307,8 @@ class Builtins {
   static void Generate_JSConstructStubApi(MacroAssembler* masm);
   static void Generate_JSEntryTrampoline(MacroAssembler* masm);
   static void Generate_JSConstructEntryTrampoline(MacroAssembler* masm);
+  static void Generate_InterpreterEntryTrampoline(MacroAssembler* masm);
+  static void Generate_InterpreterExitTrampoline(MacroAssembler* masm);
   static void Generate_NotifyDeoptimized(MacroAssembler* masm);
   static void Generate_NotifySoftDeoptimized(MacroAssembler* masm);
   static void Generate_NotifyLazyDeoptimized(MacroAssembler* masm);

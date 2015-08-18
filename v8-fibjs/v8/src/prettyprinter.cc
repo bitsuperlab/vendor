@@ -419,6 +419,18 @@ void CallPrinter::PrintLiteral(const AstRawString* value, bool quote) {
 
 #ifdef DEBUG
 
+// A helper for ast nodes that use FeedbackVectorICSlots.
+static int FormatICSlotNode(Vector<char>* buf, Expression* node,
+                            const char* node_name, FeedbackVectorICSlot slot) {
+  int pos = SNPrintF(*buf, "%s", node_name);
+  if (!slot.IsInvalid()) {
+    const char* str = Code::Kind2String(node->FeedbackICSlotKind(0));
+    pos = SNPrintF(*buf + pos, " ICSlot(%d, %s)", slot.ToInt(), str);
+  }
+  return pos;
+}
+
+
 PrettyPrinter::PrettyPrinter(Isolate* isolate, Zone* zone) {
   output_ = NULL;
   size_ = 0;
@@ -433,10 +445,10 @@ PrettyPrinter::~PrettyPrinter() {
 
 
 void PrettyPrinter::VisitBlock(Block* node) {
-  if (!node->is_initializer_block()) Print("{ ");
+  if (!node->ignore_completion_value()) Print("{ ");
   PrintStatements(node->statements());
   if (node->statements()->length() > 0) Print(" ");
-  if (!node->is_initializer_block()) Print("}");
+  if (!node->ignore_completion_value()) Print("}");
 }
 
 
@@ -719,6 +731,7 @@ void PrettyPrinter::PrintObjectLiteralProperty(
 
 void PrettyPrinter::VisitArrayLiteral(ArrayLiteral* node) {
   Print("[ ");
+  Print(" literal_index = %d", node->literal_index());
   for (int i = 0; i < node->values()->length(); i++) {
     if (i != 0) Print(",");
     Visit(node->values()->at(i));
@@ -1146,7 +1159,8 @@ void AstPrinter::PrintArguments(ZoneList<Expression*>* arguments) {
 
 
 void AstPrinter::VisitBlock(Block* node) {
-  const char* block_txt = node->is_initializer_block() ? "BLOCK INIT" : "BLOCK";
+  const char* block_txt =
+      node->ignore_completion_value() ? "BLOCK NOCOMPLETIONS" : "BLOCK";
   IndentedScope indent(this, block_txt);
   PrintStatements(node->statements());
 }
@@ -1396,6 +1410,9 @@ void AstPrinter::VisitLiteral(Literal* node) {
 
 void AstPrinter::VisitRegExpLiteral(RegExpLiteral* node) {
   IndentedScope indent(this, "REGEXP LITERAL");
+  EmbeddedVector<char, 128> buf;
+  SNPrintF(buf, "literal_index = %d\n", node->literal_index());
+  PrintIndented(buf.start());
   PrintLiteralIndented("PATTERN", node->pattern(), false);
   PrintLiteralIndented("FLAGS", node->flags(), false);
 }
@@ -1403,12 +1420,19 @@ void AstPrinter::VisitRegExpLiteral(RegExpLiteral* node) {
 
 void AstPrinter::VisitObjectLiteral(ObjectLiteral* node) {
   IndentedScope indent(this, "OBJ LITERAL");
+  EmbeddedVector<char, 128> buf;
+  SNPrintF(buf, "literal_index = %d\n", node->literal_index());
+  PrintIndented(buf.start());
   PrintProperties(node->properties());
 }
 
 
 void AstPrinter::VisitArrayLiteral(ArrayLiteral* node) {
   IndentedScope indent(this, "ARRAY LITERAL");
+
+  EmbeddedVector<char, 128> buf;
+  SNPrintF(buf, "literal_index = %d\n", node->literal_index());
+  PrintIndented(buf.start());
   if (node->values()->length() > 0) {
     IndentedScope indent(this, "VALUES");
     for (int i = 0; i < node->values()->length(); i++) {
@@ -1418,24 +1442,28 @@ void AstPrinter::VisitArrayLiteral(ArrayLiteral* node) {
 }
 
 
-// TODO(svenpanne) Start with IndentedScope.
 void AstPrinter::VisitVariableProxy(VariableProxy* node) {
   Variable* var = node->var();
   EmbeddedVector<char, 128> buf;
-  int pos = SNPrintF(buf, "VAR PROXY");
+  int pos =
+      FormatICSlotNode(&buf, node, "VAR PROXY", node->VariableFeedbackSlot());
+
   switch (var->location()) {
-    case Variable::UNALLOCATED:
+    case VariableLocation::UNALLOCATED:
       break;
-    case Variable::PARAMETER:
+    case VariableLocation::PARAMETER:
       SNPrintF(buf + pos, " parameter[%d]", var->index());
       break;
-    case Variable::LOCAL:
+    case VariableLocation::LOCAL:
       SNPrintF(buf + pos, " local[%d]", var->index());
       break;
-    case Variable::CONTEXT:
+    case VariableLocation::CONTEXT:
       SNPrintF(buf + pos, " context[%d]", var->index());
       break;
-    case Variable::LOOKUP:
+    case VariableLocation::GLOBAL:
+      SNPrintF(buf + pos, " global[%d]", var->index());
+      break;
+    case VariableLocation::LOOKUP:
       SNPrintF(buf + pos, " lookup");
       break;
   }
@@ -1463,7 +1491,10 @@ void AstPrinter::VisitThrow(Throw* node) {
 
 
 void AstPrinter::VisitProperty(Property* node) {
-  IndentedScope indent(this, "PROPERTY");
+  EmbeddedVector<char, 128> buf;
+  FormatICSlotNode(&buf, node, "PROPERTY", node->PropertyFeedbackSlot());
+  IndentedScope indent(this, buf.start());
+
   Visit(node->obj());
   Literal* literal = node->key()->AsLiteral();
   if (literal != NULL && literal->value()->IsInternalizedString()) {
@@ -1475,7 +1506,10 @@ void AstPrinter::VisitProperty(Property* node) {
 
 
 void AstPrinter::VisitCall(Call* node) {
-  IndentedScope indent(this, "CALL");
+  EmbeddedVector<char, 128> buf;
+  FormatICSlotNode(&buf, node, "CALL", node->CallFeedbackICSlot());
+  IndentedScope indent(this, buf.start());
+
   Visit(node->expression());
   PrintArguments(node->arguments());
 }
@@ -1489,7 +1523,9 @@ void AstPrinter::VisitCallNew(CallNew* node) {
 
 
 void AstPrinter::VisitCallRuntime(CallRuntime* node) {
-  IndentedScope indent(this, "CALL RUNTIME");
+  EmbeddedVector<char, 128> buf;
+  FormatICSlotNode(&buf, node, "CALL RUNTIME", node->CallRuntimeFeedbackSlot());
+  IndentedScope indent(this, buf.start());
   PrintLiteralIndented("NAME", node->name(), false);
   PrintArguments(node->arguments());
 }

@@ -403,7 +403,7 @@ void PhiInstruction::SetInput(size_t offset, int virtual_register) {
 
 InstructionBlock::InstructionBlock(Zone* zone, RpoNumber rpo_number,
                                    RpoNumber loop_header, RpoNumber loop_end,
-                                   bool deferred)
+                                   bool deferred, bool handler)
     : successors_(zone),
       predecessors_(zone),
       phis_(zone),
@@ -414,6 +414,7 @@ InstructionBlock::InstructionBlock(Zone* zone, RpoNumber rpo_number,
       code_start_(-1),
       code_end_(-1),
       deferred_(deferred),
+      handler_(handler),
       needs_frame_(false),
       must_construct_frame_(false),
       must_deconstruct_frame_(false) {}
@@ -443,9 +444,11 @@ static RpoNumber GetLoopEndRpo(const BasicBlock* block) {
 
 static InstructionBlock* InstructionBlockFor(Zone* zone,
                                              const BasicBlock* block) {
+  bool is_handler =
+      !block->empty() && block->front()->opcode() == IrOpcode::kIfException;
   InstructionBlock* instr_block = new (zone)
       InstructionBlock(zone, GetRpo(block), GetRpo(block->loop_header()),
-                       GetLoopEndRpo(block), block->deferred());
+                       GetLoopEndRpo(block), block->deferred(), is_handler);
   // Map successors and precessors
   instr_block->successors().reserve(block->SuccessorCount());
   for (BasicBlock* successor : block->successors()) {
@@ -563,9 +566,12 @@ InstructionBlock* InstructionSequence::GetInstructionBlock(
     int instruction_index) const {
   DCHECK(instruction_blocks_->size() == block_starts_.size());
   auto begin = block_starts_.begin();
-  auto end = std::lower_bound(begin, block_starts_.end(), instruction_index,
-                              std::less_equal<int>());
-  size_t index = std::distance(begin, end) - 1;
+  auto end = std::lower_bound(begin, block_starts_.end(), instruction_index);
+  // Post condition of std::lower_bound:
+  DCHECK(end == block_starts_.end() || *end >= instruction_index);
+  if (end == block_starts_.end() || *end > instruction_index) --end;
+  DCHECK(*end <= instruction_index);
+  size_t index = std::distance(begin, end);
   auto block = instruction_blocks_->at(index);
   DCHECK(block->code_start() <= instruction_index &&
          instruction_index < block->code_end());
@@ -718,7 +724,7 @@ size_t FrameStateDescriptor::GetJSFrameCount() const {
   size_t count = 0;
   for (const FrameStateDescriptor* iter = this; iter != NULL;
        iter = iter->outer_state_) {
-    if (iter->type_ == JS_FRAME) {
+    if (iter->type_ == FrameStateType::kJavaScriptFunction) {
       ++count;
     }
   }

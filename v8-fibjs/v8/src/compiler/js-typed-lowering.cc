@@ -23,9 +23,6 @@ namespace compiler {
 
 JSTypedLowering::JSTypedLowering(Editor* editor, JSGraph* jsgraph, Zone* zone)
     : AdvancedReducer(editor), jsgraph_(jsgraph), simplified_(graph()->zone()) {
-  zero_range_ = Type::Range(0.0, 0.0, graph()->zone());
-  one_range_ = Type::Range(1.0, 1.0, graph()->zone());
-  zero_thirtyone_range_ = Type::Range(0.0, 31.0, graph()->zone());
   for (size_t k = 0; k < arraysize(shifted_int32_ranges_); ++k) {
     double min = kMinInt / (1 << k);
     double max = kMaxInt / (1 << k);
@@ -142,20 +139,6 @@ class JSBinopReduction final {
     node_->ReplaceInput(1, ConvertToString(right()));
   }
 
-  // Convert inputs for bitwise shift operation (ES5 spec 11.7).
-  void ConvertInputsForShift(Signedness left_signedness) {
-    node_->ReplaceInput(0, ConvertToUI32(ConvertPlainPrimitiveToNumber(left()),
-                                         left_signedness));
-    Node* rnum =
-        ConvertToUI32(ConvertPlainPrimitiveToNumber(right()), kUnsigned);
-    Type* rnum_type = NodeProperties::GetBounds(rnum).upper;
-    if (!rnum_type->Is(lowering_->zero_thirtyone_range_)) {
-      rnum = graph()->NewNode(machine()->Word32And(), rnum,
-                              jsgraph()->Int32Constant(0x1F));
-    }
-    node_->ReplaceInput(1, rnum);
-  }
-
   void SwapInputs() {
     Node* l = left();
     Node* r = right();
@@ -252,8 +235,7 @@ class JSBinopReduction final {
   }
 
   Node* CreateFrameStateForLeftInput(Node* frame_state) {
-    FrameStateCallInfo state_info =
-        OpParameter<FrameStateCallInfo>(frame_state);
+    FrameStateInfo state_info = OpParameter<FrameStateInfo>(frame_state);
 
     if (state_info.bailout_id() == BailoutId::None()) {
       // Dummy frame state => just leave it as is.
@@ -270,8 +252,8 @@ class JSBinopReduction final {
     // the stack top. This is the slot that full code uses to store the
     // left operand.
     const Operator* op = jsgraph()->common()->FrameState(
-        state_info.type(), state_info.bailout_id(),
-        OutputFrameStateCombine::PokeAt(1), state_info.shared_info());
+        state_info.bailout_id(), OutputFrameStateCombine::PokeAt(1),
+        state_info.function_info());
 
     return graph()->NewNode(op,
                             frame_state->InputAt(kFrameStateParametersInput),
@@ -283,8 +265,7 @@ class JSBinopReduction final {
   }
 
   Node* CreateFrameStateForRightInput(Node* frame_state, Node* converted_left) {
-    FrameStateCallInfo state_info =
-        OpParameter<FrameStateCallInfo>(frame_state);
+    FrameStateInfo state_info = OpParameter<FrameStateInfo>(frame_state);
 
     if (state_info.bailout_id() == BailoutId::None()) {
       // Dummy frame state => just leave it as is.
@@ -294,8 +275,8 @@ class JSBinopReduction final {
     // Create a frame state that stores the result of the operation to the
     // top of the stack (i.e., the slot used for the right operand).
     const Operator* op = jsgraph()->common()->FrameState(
-        state_info.type(), state_info.bailout_id(),
-        OutputFrameStateCombine::PokeAt(0), state_info.shared_info());
+        state_info.bailout_id(), OutputFrameStateCombine::PokeAt(0),
+        state_info.function_info());
 
     // Change the left operand {converted_left} on the expression stack.
     Node* stack = frame_state->InputAt(2);
@@ -490,14 +471,14 @@ Reduction JSTypedLowering::ReduceUI32Shift(Node* node,
   JSBinopReduction r(this, node);
   if (r.IsStrong()) {
     if (r.BothInputsAre(Type::Number())) {
-      r.ConvertInputsForShift(left_signedness);
+      r.ConvertInputsToUI32(left_signedness, kUnsigned);
       return r.ChangeToPureOperator(shift_op);
     }
     return NoChange();
   }
   Node* frame_state = NodeProperties::GetFrameStateInput(node, 1);
   r.ConvertInputsToNumber(frame_state);
-  r.ConvertInputsForShift(left_signedness);
+  r.ConvertInputsToUI32(left_signedness, kUnsigned);
   return r.ChangeToPureOperator(shift_op);
 }
 
@@ -803,18 +784,35 @@ Reduction JSTypedLowering::ReduceJSToString(Node* node) {
 }
 
 
+Reduction JSTypedLowering::ReduceJSLoadGlobal(Node* node) {
+  // Optimize global constants like "undefined", "Infinity", and "NaN".
+  Handle<Name> name = LoadGlobalParametersOf(node->op()).name().handle();
+  Handle<Object> constant_value = factory()->GlobalConstantFor(name);
+  if (!constant_value.is_null()) {
+    Node* constant = jsgraph()->Constant(constant_value);
+    ReplaceWithValue(node, constant);
+    return Replace(constant);
+  }
+  return NoChange();
+}
+
+
 Reduction JSTypedLowering::ReduceJSLoadNamed(Node* node) {
-  Node* object = NodeProperties::GetValueInput(node, 0);
-  Type* object_type = NodeProperties::GetBounds(object).upper;
-  if (object_type->Is(Type::GlobalObject())) {
-    // Optimize global constants like "undefined", "Infinity", and "NaN".
-    Handle<Name> name = LoadNamedParametersOf(node->op()).name().handle();
-    Handle<Object> constant_value = factory()->GlobalConstantFor(name);
-    if (!constant_value.is_null()) {
-      Node* constant = jsgraph()->Constant(constant_value);
-      ReplaceWithValue(node, constant);
-      return Replace(constant);
-    }
+  DCHECK_EQ(IrOpcode::kJSLoadNamed, node->opcode());
+  Node* receiver = NodeProperties::GetValueInput(node, 0);
+  Type* receiver_type = NodeProperties::GetBounds(receiver).upper;
+  Node* effect = NodeProperties::GetEffectInput(node);
+  Node* control = NodeProperties::GetControlInput(node);
+  Handle<Name> name = LoadNamedParametersOf(node->op()).name().handle();
+  // Optimize "length" property of strings.
+  if (name.is_identical_to(factory()->length_string()) &&
+      receiver_type->Is(Type::String())) {
+    Node* value = effect =
+        graph()->NewNode(simplified()->LoadField(
+                             AccessBuilder::ForStringLength(graph()->zone())),
+                         receiver, effect, control);
+    ReplaceWithValue(node, value, effect);
+    return Replace(value);
   }
   return NoChange();
 }
@@ -824,7 +822,7 @@ Reduction JSTypedLowering::ReduceJSLoadProperty(Node* node) {
   Node* key = NodeProperties::GetValueInput(node, 1);
   Node* base = NodeProperties::GetValueInput(node, 0);
   Type* key_type = NodeProperties::GetBounds(key).upper;
-  HeapObjectMatcher<Object> mbase(base);
+  HeapObjectMatcher mbase(base);
   if (mbase.HasValue() && mbase.Value().handle()->IsJSTypedArray()) {
     Handle<JSTypedArray> const array =
         Handle<JSTypedArray>::cast(mbase.Value().handle());
@@ -834,11 +832,10 @@ Reduction JSTypedLowering::ReduceJSLoadProperty(Node* node) {
       size_t const k = ElementSizeLog2Of(access.machine_type());
       double const byte_length = array->byte_length()->Number();
       CHECK_LT(k, arraysize(shifted_int32_ranges_));
-      if (IsExternalArrayElementsKind(array->map()->elements_kind()) &&
-          key_type->Is(shifted_int32_ranges_[k]) && byte_length <= kMaxInt) {
+      if (key_type->Is(shifted_int32_ranges_[k]) && byte_length <= kMaxInt) {
         // JSLoadProperty(typed-array, int32)
-        Handle<ExternalArray> elements =
-            Handle<ExternalArray>::cast(handle(array->elements()));
+        Handle<FixedTypedArrayBase> elements =
+            Handle<FixedTypedArrayBase>::cast(handle(array->elements()));
         Node* buffer = jsgraph()->PointerConstant(elements->external_pointer());
         Node* length = jsgraph()->Constant(byte_length);
         Node* effect = NodeProperties::GetEffectInput(node);
@@ -871,7 +868,7 @@ Reduction JSTypedLowering::ReduceJSStoreProperty(Node* node) {
   Node* value = NodeProperties::GetValueInput(node, 2);
   Type* key_type = NodeProperties::GetBounds(key).upper;
   Type* value_type = NodeProperties::GetBounds(value).upper;
-  HeapObjectMatcher<Object> mbase(base);
+  HeapObjectMatcher mbase(base);
   if (mbase.HasValue() && mbase.Value().handle()->IsJSTypedArray()) {
     Handle<JSTypedArray> const array =
         Handle<JSTypedArray>::cast(mbase.Value().handle());
@@ -881,12 +878,11 @@ Reduction JSTypedLowering::ReduceJSStoreProperty(Node* node) {
       size_t const k = ElementSizeLog2Of(access.machine_type());
       double const byte_length = array->byte_length()->Number();
       CHECK_LT(k, arraysize(shifted_int32_ranges_));
-      if (IsExternalArrayElementsKind(array->map()->elements_kind()) &&
-          access.external_array_type() != kExternalUint8ClampedArray &&
+      if (access.external_array_type() != kExternalUint8ClampedArray &&
           key_type->Is(shifted_int32_ranges_[k]) && byte_length <= kMaxInt) {
         // JSLoadProperty(typed-array, int32)
-        Handle<ExternalArray> elements =
-            Handle<ExternalArray>::cast(handle(array->elements()));
+        Handle<FixedTypedArrayBase> elements =
+            Handle<FixedTypedArrayBase>::cast(handle(array->elements()));
         Node* buffer = jsgraph()->PointerConstant(elements->external_pointer());
         Node* length = jsgraph()->Constant(byte_length);
         Node* context = NodeProperties::GetContextInput(node);
@@ -1025,14 +1021,14 @@ Reduction JSTypedLowering::ReduceJSLoadDynamicGlobal(Node* node) {
       javascript()->LoadContext(0, Context::GLOBAL_OBJECT_INDEX, true), context,
       context, effect);
   Node* fast = graph()->NewNode(
-      javascript()->LoadNamed(name, access.feedback(), access.mode()), global,
-      vector, context, state1, state2, global, check_true);
+      javascript()->LoadGlobal(name, access.feedback(), access.typeof_mode()),
+      context, global, vector, context, state1, state2, global, check_true);
 
   // Slow case, because variable potentially shadowed. Perform dynamic lookup.
   uint32_t check_bitset = DynamicGlobalAccess::kFullCheckRequired;
   Node* slow = graph()->NewNode(
       javascript()->LoadDynamicGlobal(access.name(), check_bitset,
-                                      access.feedback(), access.mode()),
+                                      access.feedback(), access.typeof_mode()),
       vector, context, context, state1, state2, effect, check_false);
 
   // Replace value, effect and control uses accordingly.
@@ -1132,8 +1128,8 @@ Reduction JSTypedLowering::ReduceJSCreateClosure(Node* node) {
 
 Reduction JSTypedLowering::ReduceJSCreateLiteralArray(Node* node) {
   DCHECK_EQ(IrOpcode::kJSCreateLiteralArray, node->opcode());
-  HeapObjectMatcher<FixedArray> mconst(NodeProperties::GetValueInput(node, 2));
-  int length = mconst.Value().handle()->length();
+  HeapObjectMatcher mconst(NodeProperties::GetValueInput(node, 2));
+  int length = Handle<FixedArray>::cast(mconst.Value().handle())->length();
   int flags = OpParameter<int>(node->op());
 
   // Use the FastCloneShallowArrayStub only for shallow boilerplates up to the
@@ -1162,9 +1158,9 @@ Reduction JSTypedLowering::ReduceJSCreateLiteralArray(Node* node) {
 
 Reduction JSTypedLowering::ReduceJSCreateLiteralObject(Node* node) {
   DCHECK_EQ(IrOpcode::kJSCreateLiteralObject, node->opcode());
-  HeapObjectMatcher<FixedArray> mconst(NodeProperties::GetValueInput(node, 2));
+  HeapObjectMatcher mconst(NodeProperties::GetValueInput(node, 2));
   // Constants are pairs, see ObjectLiteral::properties_count().
-  int length = mconst.Value().handle()->length() / 2;
+  int length = Handle<FixedArray>::cast(mconst.Value().handle())->length() / 2;
   int flags = OpParameter<int>(node->op());
 
   // Use the FastCloneShallowObjectStub only for shallow boilerplates without
@@ -1227,9 +1223,10 @@ Reduction JSTypedLowering::ReduceJSCreateWithContext(Node* node) {
 Reduction JSTypedLowering::ReduceJSCreateBlockContext(Node* node) {
   DCHECK_EQ(IrOpcode::kJSCreateBlockContext, node->opcode());
   Node* const input = NodeProperties::GetValueInput(node, 0);
-  HeapObjectMatcher<ScopeInfo> minput(input);
+  HeapObjectMatcher minput(input);
   DCHECK(minput.HasValue());  // TODO(mstarzinger): Make ScopeInfo static.
-  int context_length = minput.Value().handle()->ContextLength();
+  int context_length =
+      Handle<ScopeInfo>::cast(minput.Value().handle())->ContextLength();
   if (FLAG_turbo_allocate && context_length < kBlockContextAllocationLimit) {
     // JSCreateBlockContext(s:scope[length < limit], f)
     Node* const effect = NodeProperties::GetEffectInput(node);
@@ -1617,11 +1614,12 @@ Reduction JSTypedLowering::Reduce(Node* node) {
     case IrOpcode::kJSBitwiseAnd:
       return ReduceInt32Binop(node, machine()->Word32And());
     case IrOpcode::kJSShiftLeft:
-      return ReduceUI32Shift(node, kSigned, machine()->Word32Shl());
+      return ReduceUI32Shift(node, kSigned, simplified()->NumberShiftLeft());
     case IrOpcode::kJSShiftRight:
-      return ReduceUI32Shift(node, kSigned, machine()->Word32Sar());
+      return ReduceUI32Shift(node, kSigned, simplified()->NumberShiftRight());
     case IrOpcode::kJSShiftRightLogical:
-      return ReduceUI32Shift(node, kUnsigned, machine()->Word32Shr());
+      return ReduceUI32Shift(node, kUnsigned,
+                             simplified()->NumberShiftRightLogical());
     case IrOpcode::kJSAdd:
       return ReduceJSAdd(node);
     case IrOpcode::kJSSubtract:
@@ -1640,6 +1638,8 @@ Reduction JSTypedLowering::Reduce(Node* node) {
       return ReduceJSToNumber(node);
     case IrOpcode::kJSToString:
       return ReduceJSToString(node);
+    case IrOpcode::kJSLoadGlobal:
+      return ReduceJSLoadGlobal(node);
     case IrOpcode::kJSLoadNamed:
       return ReduceJSLoadNamed(node);
     case IrOpcode::kJSLoadProperty:

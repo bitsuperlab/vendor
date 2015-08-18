@@ -209,10 +209,9 @@ class MarkingDeque {
   // heap.
   INLINE(void PushBlack(HeapObject* object)) {
     DCHECK(object->IsHeapObject());
-    DCHECK(object->map()->IsMap());
     if (IsFull()) {
       Marking::BlackToGrey(object);
-      MemoryChunk::IncrementLiveBytesFromGC(object->address(), -object->Size());
+      MemoryChunk::IncrementLiveBytesFromGC(object, -object->Size());
       SetOverflowed();
     } else {
       array_[top_] = object;
@@ -222,7 +221,6 @@ class MarkingDeque {
 
   INLINE(void PushGrey(HeapObject* object)) {
     DCHECK(object->IsHeapObject());
-    DCHECK(object->map()->IsMap());
     if (IsFull()) {
       SetOverflowed();
     } else {
@@ -254,7 +252,7 @@ class MarkingDeque {
     DCHECK(Marking::IsBlack(Marking::MarkBitFrom(object)));
     if (IsFull()) {
       Marking::BlackToGrey(object);
-      MemoryChunk::IncrementLiveBytesFromGC(object->address(), -object->Size());
+      MemoryChunk::IncrementLiveBytesFromGC(object, -object->Size());
       SetOverflowed();
     } else {
       bottom_ = ((bottom_ - 1) & mask_);
@@ -327,6 +325,12 @@ class SlotsBuffer {
     slots_[idx_++] = slot;
   }
 
+  // Should be used for testing only.
+  ObjectSlot Get(intptr_t i) {
+    DCHECK(i >= 0 && i < kNumberOfElements);
+    return slots_[i];
+  }
+
   enum SlotType {
     EMBEDDED_OBJECT_SLOT,
     OBJECT_SLOT,
@@ -335,7 +339,6 @@ class SlotsBuffer {
     CODE_TARGET_SLOT,
     CODE_ENTRY_SLOT,
     DEBUG_TARGET_SLOT,
-    JS_RETURN_SLOT,
     NUMBER_OF_SLOT_TYPES
   };
 
@@ -355,8 +358,6 @@ class SlotsBuffer {
         return "CODE_ENTRY_SLOT";
       case DEBUG_TARGET_SLOT:
         return "DEBUG_TARGET_SLOT";
-      case JS_RETURN_SLOT:
-        return "JS_RETURN_SLOT";
       case NUMBER_OF_SLOT_TYPES:
         return "NUMBER_OF_SLOT_TYPES";
     }
@@ -379,14 +380,9 @@ class SlotsBuffer {
 
   inline bool HasSpaceForTypedSlot() { return idx_ < kNumberOfElements - 1; }
 
-  static void UpdateSlotsRecordedIn(Heap* heap, SlotsBuffer* buffer,
-                                    bool code_slots_filtering_required) {
+  static void UpdateSlotsRecordedIn(Heap* heap, SlotsBuffer* buffer) {
     while (buffer != NULL) {
-      if (code_slots_filtering_required) {
-        buffer->UpdateSlotsWithFilter(heap);
-      } else {
         buffer->UpdateSlots(heap);
-      }
       buffer = buffer->next();
     }
   }
@@ -424,6 +420,10 @@ class SlotsBuffer {
   // marking, when the whole transitive closure is known and must be called
   // before sweeping when mark bits are still intact.
   static void RemoveInvalidSlots(Heap* heap, SlotsBuffer* buffer);
+
+  // Eliminate all slots that are within the given address range.
+  static void RemoveObjectSlots(Heap* heap, SlotsBuffer* buffer,
+                                Address start_slot, Address end_slot);
 
   // Ensures that there are no invalid slots in the chain of slots buffers.
   static void VerifySlots(Heap* heap, SlotsBuffer* buffer);
@@ -640,11 +640,6 @@ class MarkCompactCollector {
   void VerifyOmittedMapChecks();
 #endif
 
-  INLINE(static bool ShouldSkipEvacuationSlotRecording(Object** anchor)) {
-    return Page::FromAddress(reinterpret_cast<Address>(anchor))
-        ->ShouldSkipEvacuationSlotRecording();
-  }
-
   INLINE(static bool ShouldSkipEvacuationSlotRecording(Object* host)) {
     return Page::FromAddress(reinterpret_cast<Address>(host))
         ->ShouldSkipEvacuationSlotRecording();
@@ -656,11 +651,11 @@ class MarkCompactCollector {
   }
 
   void RecordRelocSlot(RelocInfo* rinfo, Object* target);
-  void RecordCodeEntrySlot(Address slot, Code* target);
+  void RecordCodeEntrySlot(HeapObject* object, Address slot, Code* target);
   void RecordCodeTargetPatch(Address pc, Code* target);
 
   INLINE(void RecordSlot(
-      Object** anchor_slot, Object** slot, Object* object,
+      HeapObject* object, Object** slot, Object* target,
       SlotsBuffer::AdditionMode mode = SlotsBuffer::FAIL_ON_OVERFLOW));
 
   void MigrateObject(HeapObject* dst, HeapObject* src, int size,
@@ -698,6 +693,8 @@ class MarkCompactCollector {
   int SweepInParallel(Page* page, PagedSpace* space);
 
   void EnsureSweepingCompleted();
+
+  void SweepOrWaitUntilSweepingCompleted(Page* page);
 
   // If sweeper threads are not active this method will return true. If
   // this is a latency issue we should be smarter here. Otherwise, it will
@@ -746,13 +743,17 @@ class MarkCompactCollector {
   bool IsSlotInLiveObject(Address slot);
   void VerifyIsSlotInLiveObject(Address slot, HeapObject* object);
 
+  // Removes all the slots in the slot buffers that are within the given
+  // address range.
+  void RemoveObjectSlots(Address start_slot, Address end_slot);
+
  private:
   class SweeperTask;
 
   explicit MarkCompactCollector(Heap* heap);
   ~MarkCompactCollector();
 
-  bool MarkInvalidatedCode();
+  void RemoveDeoptimizedCodeSlots();
   bool WillBeDeoptimized(Code* code);
   void RemoveDeadInvalidatedCode();
   void ProcessInvalidatedCode(ObjectVisitor* visitor);
@@ -974,7 +975,9 @@ class MarkCompactCollector {
   List<Page*> evacuation_candidates_;
   List<Code*> invalidated_code_;
 
-  SmartPointer<FreeList> free_list_old_space_;
+  base::SmartPointer<FreeList> free_list_old_space_;
+  base::SmartPointer<FreeList> free_list_code_space_;
+  base::SmartPointer<FreeList> free_list_map_space_;
 
   friend class Heap;
 };

@@ -7,53 +7,43 @@
  */
 
 #include <stdio.h>
+#include <assert.h>
 #include "service.h"
 
 namespace exlib
 {
 
-int Fiber::tlsAlloc()
-{
-	Service* pService = Service::getFiberService();
-	int i;
+static char s_tls[TLS_SIZE];
 
-	if (pService)
-	{
-		for (i = 0; i < TLS_SIZE; i++)
-			if (pService->m_tls[i] == 0)
-			{
-				pService->m_tls[i] = 1;
-				return i;
-			}
-	}
+int32_t Thread_base::tlsAlloc()
+{
+	int32_t i;
+
+	for (i = 0; i < TLS_SIZE; i++)
+		if (s_tls[i] == 0)
+		{
+			s_tls[i] = 1;
+			return i;
+		}
 
 	return -1;
 }
 
-void* Fiber::tlsGet(int idx)
+void* Thread_base::tlsGet(int32_t idx)
 {
-	Service* pService = Service::getFiberService();
-
-	if (pService)
-		return pService->m_running->m_tls[idx];
-
-	return NULL;
+	assert(current() != 0);
+	return current()->m_tls[idx];
 }
 
-void Fiber::tlsPut(int idx, void* v)
+void Thread_base::tlsPut(int32_t idx, void* v)
 {
-	Service* pService = Service::getFiberService();
-
-	if (pService)
-		pService->m_running->m_tls[idx] = v;
+	assert(current() != 0);
+	current()->m_tls[idx] = v;
 }
 
-void Fiber::tlsFree(int idx)
+void Thread_base::tlsFree(int32_t idx)
 {
-	Service* pService = Service::getFiberService();
-
-	if (pService)
-		pService->m_tls[idx] = 0;
+	s_tls[idx] = 0;
 }
 
 }

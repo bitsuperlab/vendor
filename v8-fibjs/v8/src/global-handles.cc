@@ -39,13 +39,13 @@ class GlobalHandles::Node {
 
   // Maps handle location (slot) to the containing node.
   static Node* FromLocation(Object** location) {
-    DCHECK(OFFSET_OF(Node, object_) == 0);
+    DCHECK(offsetof(Node, object_) == 0);
     return reinterpret_cast<Node*>(location);
   }
 
   Node() {
-    DCHECK(OFFSET_OF(Node, class_id_) == Internals::kNodeClassIdOffset);
-    DCHECK(OFFSET_OF(Node, flags_) == Internals::kNodeFlagsOffset);
+    DCHECK(offsetof(Node, class_id_) == Internals::kNodeClassIdOffset);
+    DCHECK(offsetof(Node, flags_) == Internals::kNodeFlagsOffset);
     STATIC_ASSERT(static_cast<int>(NodeState::kMask) ==
                   Internals::kNodeStateMask);
     STATIC_ASSERT(WEAK == Internals::kNodeStateIsWeakValue);
@@ -495,6 +495,27 @@ class GlobalHandles::NodeIterator {
   DISALLOW_COPY_AND_ASSIGN(NodeIterator);
 };
 
+class GlobalHandles::PendingPhantomCallbacksSecondPassTask
+    : public v8::internal::CancelableTask {
+ public:
+  // Takes ownership of the contents of pending_phantom_callbacks, leaving it in
+  // the same state it would be after a call to Clear().
+  PendingPhantomCallbacksSecondPassTask(
+      List<PendingPhantomCallback>* pending_phantom_callbacks, Isolate* isolate)
+      : CancelableTask(isolate) {
+    pending_phantom_callbacks_.Swap(pending_phantom_callbacks);
+  }
+
+  void RunInternal() override {
+    InvokeSecondPassPhantomCallbacks(&pending_phantom_callbacks_, isolate_);
+  }
+
+ private:
+  List<PendingPhantomCallback> pending_phantom_callbacks_;
+
+  DISALLOW_COPY_AND_ASSIGN(PendingPhantomCallbacksSecondPassTask);
+};
+
 
 GlobalHandles::GlobalHandles(Isolate* isolate)
     : isolate_(isolate),
@@ -709,6 +730,19 @@ bool GlobalHandles::IterateObjectGroups(ObjectVisitor* v,
 }
 
 
+void GlobalHandles::InvokeSecondPassPhantomCallbacks(
+    List<PendingPhantomCallback>* callbacks, Isolate* isolate) {
+  while (callbacks->length() != 0) {
+    auto callback = callbacks->RemoveLast();
+    DCHECK(callback.node() == nullptr);
+    // No second pass callback required.
+    if (callback.callback() == nullptr) continue;
+    // Fire second pass callback
+    callback.Invoke(isolate);
+  }
+}
+
+
 int GlobalHandles::PostScavengeProcessing(
     const int initial_post_gc_processing_count) {
   int freed_nodes = 0;
@@ -791,7 +825,8 @@ void GlobalHandles::UpdateListOfNewSpaceNodes() {
 }
 
 
-int GlobalHandles::DispatchPendingPhantomCallbacks() {
+int GlobalHandles::DispatchPendingPhantomCallbacks(
+    bool synchronous_second_pass) {
   int freed_nodes = 0;
   {
     // The initial pass callbacks must simply clear the nodes.
@@ -804,14 +839,15 @@ int GlobalHandles::DispatchPendingPhantomCallbacks() {
       freed_nodes++;
     }
   }
-  // The second pass empties the list.
-  while (pending_phantom_callbacks_.length() != 0) {
-    auto callback = pending_phantom_callbacks_.RemoveLast();
-    DCHECK(callback.node() == nullptr);
-    // No second pass callback required.
-    if (callback.callback() == nullptr) continue;
-    // Fire second pass callback.
-    callback.Invoke(isolate());
+  if (pending_phantom_callbacks_.length() > 0) {
+    if (FLAG_optimize_for_size || FLAG_predictable || synchronous_second_pass) {
+      InvokeSecondPassPhantomCallbacks(&pending_phantom_callbacks_, isolate());
+    } else {
+      auto task = new PendingPhantomCallbacksSecondPassTask(
+          &pending_phantom_callbacks_, isolate());
+      V8::GetCurrentPlatform()->CallOnForegroundThread(
+          reinterpret_cast<v8::Isolate*>(isolate()), task);
+    }
   }
   pending_phantom_callbacks_.Clear();
   return freed_nodes;
@@ -838,14 +874,17 @@ void GlobalHandles::PendingPhantomCallback::Invoke(Isolate* isolate) {
 }
 
 
-int GlobalHandles::PostGarbageCollectionProcessing(GarbageCollector collector) {
+int GlobalHandles::PostGarbageCollectionProcessing(
+    GarbageCollector collector, const v8::GCCallbackFlags gc_callback_flags) {
   // Process weak global handle callbacks. This must be done after the
   // GC is completely done, because the callbacks may invoke arbitrary
   // API functions.
   DCHECK(isolate_->heap()->gc_state() == Heap::NOT_IN_GC);
   const int initial_post_gc_processing_count = ++post_gc_processing_count_;
   int freed_nodes = 0;
-  freed_nodes += DispatchPendingPhantomCallbacks();
+  bool synchronous_second_pass =
+      (gc_callback_flags & kGCCallbackFlagForced) != 0;
+  freed_nodes += DispatchPendingPhantomCallbacks(synchronous_second_pass);
   if (initial_post_gc_processing_count != post_gc_processing_count_) {
     // If the callbacks caused a nested GC, then return.  See comment in
     // PostScavengeProcessing.

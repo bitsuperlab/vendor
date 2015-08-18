@@ -228,6 +228,15 @@ TypeImpl<Config>::BitsetType::Lub(i::Map* map) {
     }
     case HEAP_NUMBER_TYPE:
       return kNumber & kTaggedPointer;
+    case FLOAT32X4_TYPE:
+    case INT32X4_TYPE:
+    case BOOL32X4_TYPE:
+    case INT16X8_TYPE:
+    case BOOL16X8_TYPE:
+    case INT8X16_TYPE:
+    case BOOL8X16_TYPE:
+      // TODO(bbudge): Add type bits for SIMD value types.
+      return kAny;
     case JS_VALUE_TYPE:
     case JS_DATE_TYPE:
     case JS_OBJECT_TYPE:
@@ -235,6 +244,7 @@ TypeImpl<Config>::BitsetType::Lub(i::Map* map) {
     case JS_GENERATOR_OBJECT_TYPE:
     case JS_MODULE_TYPE:
     case JS_BUILTINS_OBJECT_TYPE:
+    case JS_GLOBAL_OBJECT_TYPE:
     case JS_GLOBAL_PROXY_TYPE:
     case JS_ARRAY_BUFFER_TYPE:
     case JS_ARRAY_TYPE:
@@ -248,8 +258,6 @@ TypeImpl<Config>::BitsetType::Lub(i::Map* map) {
     case JS_WEAK_SET_TYPE:
       if (map->is_undetectable()) return kUndetectable;
       return kOtherObject;
-    case JS_GLOBAL_OBJECT_TYPE:
-      return kGlobalObject;
     case JS_FUNCTION_TYPE:
       return kOtherObject;  // TODO(rossberg): there should be a Function type.
     case JS_REGEXP_TYPE:
@@ -274,6 +282,7 @@ TypeImpl<Config>::BitsetType::Lub(i::Map* map) {
     case ACCESSOR_PAIR_TYPE:
     case FIXED_ARRAY_TYPE:
     case BYTE_ARRAY_TYPE:
+    case BYTECODE_ARRAY_TYPE:
     case FOREIGN_TYPE:
     case SCRIPT_TYPE:
     case CODE_TYPE:

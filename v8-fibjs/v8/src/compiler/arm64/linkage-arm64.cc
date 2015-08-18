@@ -21,17 +21,17 @@ struct Arm64LinkageHelperTraits {
   static Register ReturnValue2Reg() { return x1; }
   static Register JSCallFunctionReg() { return x1; }
   static Register ContextReg() { return cp; }
+  static Register InterpreterBytecodeOffsetReg() {
+    return kInterpreterBytecodeOffsetRegister;
+  }
+  static Register InterpreterBytecodeArrayReg() {
+    return kInterpreterBytecodeArrayRegister;
+  }
+  static Register InterpreterDispatchTableReg() {
+    return kInterpreterDispatchTableRegister;
+  }
   static Register RuntimeCallFunctionReg() { return x1; }
   static Register RuntimeCallArgCountReg() { return x0; }
-  static RegList CCalleeSaveRegisters() {
-    // TODO(dcarney): correct callee saved registers.
-    return 0;
-  }
-  static Register CRegisterParameter(int i) {
-    static Register register_parameters[] = {x0, x1, x2, x3, x4, x5, x6, x7};
-    return register_parameters[i];
-  }
-  static int CRegisterParametersLength() { return 8; }
 };
 
 
@@ -62,9 +62,8 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 }
 
 
-CallDescriptor* Linkage::GetSimplifiedCDescriptor(Zone* zone,
-                                                  const MachineSignature* sig) {
-  return LH::GetSimplifiedCDescriptor(zone, sig);
+CallDescriptor* Linkage::GetInterpreterDispatchDescriptor(Zone* zone) {
+  return LH::GetInterpreterDispatchDescriptor(zone);
 }
 
 }  // namespace compiler

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#define _CRT_RAND_S
-
 #include "src/base/utils/random-number-generator.h"
 
 #include <stdio.h>
@@ -43,7 +41,6 @@ RandomNumberGenerator::RandomNumberGenerator() {
   }
 
 #if V8_OS_CYGWIN || V8_OS_WIN
-   
   // Use rand_s() to gather entropy on Windows. See:
   // https://code.google.com/p/v8/issues/detail?id=2905
   unsigned first_half, second_half;

@@ -10,12 +10,18 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <time.h>
+#include <assert.h>
 
 #include "osconfig.h"
 #include "service.h"
 #include "thread.h"
 
 #include <map>
+
+#ifndef WIN32
+#include <cxxabi.h>
+#include <dlfcn.h>
+#endif
 
 namespace v8
 {
@@ -34,26 +40,26 @@ public:
 namespace exlib
 {
 
-exlib::lockfree<AsyncEvent> s_acSleep;
-std::multimap<double, AsyncEvent *> s_tms;
-
-
-Fiber *Fiber::Current()
+class Sleeping : public linkitem
 {
-    Service *pService = Service::getFiberService();
+public:
+    Sleeping(Fiber* now, int32_t tm) :
+        m_now(now), m_tm(tm)
+    {}
+
+public:
+    Fiber* m_now;
+    int32_t m_tm;
+};
+
+Fiber *Fiber::current()
+{
+    Service *pService = Service::current();
 
     if (pService)
         return pService->m_running;
 
     return NULL;
-}
-
-void Fiber::yield()
-{
-    Service *pService = Service::getFiberService();
-
-    if (pService)
-        pService->yield();
 }
 
 void Fiber::destroy()
@@ -65,96 +71,110 @@ void Fiber::destroy()
 #endif
 }
 
+void Fiber::join()
+{
+    m_joins.wait();
+}
+
+void Fiber::suspend()
+{
+    m_pService->switchConext();
+}
+
+void Fiber::resume()
+{
+    m_pService->m_resume.putTail(this);
+}
+
+void Fiber::yield()
+{
+    m_pService->m_resume.putTail(this);
+    m_pService->switchConext();
+}
+
 static class _timerThread: public OSThread
 {
 public:
-    _timerThread()
-    {
-        start();
-    }
-
-    OSSemaphore m_sem;
-    double now;
-
     void wait()
     {
-        std::multimap<double, AsyncEvent *>::iterator e;
+        std::multimap<double, Sleeping *>::iterator e;
 
-        e = s_tms.begin();
-        if (e != s_tms.end())
-            m_sem.TimedWait((int32_t)(e->first - now));
+        e = m_tms.begin();
+        if (e != m_tms.end())
+            m_sem.TimedWait((int32_t)(e->first - m_tm));
         else
             m_sem.Wait();
     }
 
     virtual void Run()
     {
-        now = v8::base::OS::TimeCurrentMillis();
-
         while (1)
         {
-            AsyncEvent *p;
-            std::multimap<double, AsyncEvent *>::iterator e;
+            Sleeping *p;
+            std::multimap<double, Sleeping *>::iterator e;
 
             wait();
 
-            now = v8::base::OS::TimeCurrentMillis();
+            m_tm = v8::base::OS::TimeCurrentMillis();
 
             while (1)
             {
-                p = s_acSleep.get();
+                p = m_acSleep.getHead();
                 if (p == NULL)
                     break;
 
-                s_tms.insert(std::make_pair(now + p->result(), p));
+                m_tms.insert(std::make_pair(m_tm + p->m_tm, p));
             }
 
             while (1)
             {
-                e = s_tms.begin();
-                if (e == s_tms.end())
+                e = m_tms.begin();
+                if (e == m_tms.end())
                     break;
-                if (e->first > now)
+                if (e->first > m_tm)
                     break;
 
-                e->second->apost(0);
-                s_tms.erase(e);
+                e->second->m_now->resume();
+                m_tms.erase(e);
             }
         }
     }
 
-    static void post(AsyncEvent *p);
+    void post(Sleeping *p)
+    {
+        m_acSleep.putTail(p);
+        m_sem.Post();
+    }
 
+private:
+    OSSemaphore m_sem;
+    double m_tm;
+    LockedList<Sleeping> m_acSleep;
+    std::multimap<double, Sleeping *> m_tms;
 } s_timer;
 
-void _timerThread::post(AsyncEvent *p)
+void init_timer()
 {
-    s_acSleep.put(p);
-    s_timer.m_sem.Post();
+    s_timer.start();
 }
 
-void AsyncEvent::sleep(int ms)
+void Fiber::sleep(int32_t ms)
 {
-    m_v = ms;
-    _timerThread::post(this);
-}
-
-void Fiber::sleep(int ms)
-{
-    if (Service::hasService())
-    {
-        if (ms <= 0)
-            yield();
-        else
-        {
-            AsyncEvent as;
-
-            as.sleep(ms);
-            as.wait();
-        }
+    if (ms <= 0) {
+        assert(current() != 0);
+        current()->yield();
     }
     else
-        OSThread::Sleep(ms);
+    {
+        Fiber* now = current();
+
+        assert(now != 0);
+
+        Sleeping as(now, ms);
+
+        s_timer.post(&as);
+        now->suspend();
+    }
 }
 
 }

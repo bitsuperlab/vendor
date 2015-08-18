@@ -16,37 +16,16 @@ namespace v8 {
 namespace internal {
 namespace compiler {
 
-#ifdef _WIN64
-const bool kWin64 = true;
-#else
-const bool kWin64 = false;
-#endif
-
 struct X64LinkageHelperTraits {
   static Register ReturnValueReg() { return rax; }
   static Register ReturnValue2Reg() { return rdx; }
   static Register JSCallFunctionReg() { return rdi; }
   static Register ContextReg() { return rsi; }
+  static Register InterpreterBytecodeOffsetReg() { return r12; }
+  static Register InterpreterBytecodeArrayReg() { return r14; }
+  static Register InterpreterDispatchTableReg() { return r15; }
   static Register RuntimeCallFunctionReg() { return rbx; }
   static Register RuntimeCallArgCountReg() { return rax; }
-  static RegList CCalleeSaveRegisters() {
-    if (kWin64) {
-      return rbx.bit() | rdi.bit() | rsi.bit() | r12.bit() | r13.bit() |
-             r14.bit() | r15.bit();
-    } else {
-      return rbx.bit() | r12.bit() | r13.bit() | r14.bit() | r15.bit();
-    }
-  }
-  static Register CRegisterParameter(int i) {
-    if (kWin64) {
-      static Register register_parameters[] = {rcx, rdx, r8, r9};
-      return register_parameters[i];
-    } else {
-      static Register register_parameters[] = {rdi, rsi, rdx, rcx, r8, r9};
-      return register_parameters[i];
-    }
-  }
-  static int CRegisterParametersLength() { return kWin64 ? 4 : 6; }
 };
 
 typedef LinkageHelper<X64LinkageHelperTraits> LH;
@@ -76,9 +55,8 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 }
 
 
-CallDescriptor* Linkage::GetSimplifiedCDescriptor(Zone* zone,
-                                                  const MachineSignature* sig) {
-  return LH::GetSimplifiedCDescriptor(zone, sig);
+CallDescriptor* Linkage::GetInterpreterDispatchDescriptor(Zone* zone) {
+  return LH::GetInterpreterDispatchDescriptor(zone);
 }
 
 }  // namespace compiler

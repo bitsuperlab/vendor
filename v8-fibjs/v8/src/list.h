@@ -5,6 +5,8 @@
 #ifndef V8_LIST_H_
 #define V8_LIST_H_
 
+#include <algorithm>
+
 #include "src/checks.h"
 #include "src/utils.h"
 
@@ -137,6 +139,9 @@ class List {
   // Drop the last 'count' elements from the list.
   INLINE(void RewindBy(int count)) { Rewind(length_ - count); }
 
+  // Swaps the contents of the two lists.
+  INLINE(void Swap(List<T, AllocationPolicy>* list));
+
   // Halve the capacity if fill level is less than a quarter.
   INLINE(void Trim(AllocationPolicy allocator = AllocationPolicy()));
 
@@ -149,12 +154,15 @@ class List {
   void Iterate(Visitor* visitor);
 
   // Sort all list entries (using QuickSort)
-  void Sort(int (*cmp)(const T* x, const T* y), size_t start, size_t length);
-  void Sort(int (*cmp)(const T* x, const T* y));
+  template <typename CompareFunction>
+  void Sort(CompareFunction cmp, size_t start, size_t length);
+  template <typename CompareFunction>
+  void Sort(CompareFunction cmp);
   void Sort();
-  void StableSort(int (*cmp)(const T* x, const T* y), size_t start,
-                  size_t length);
-  void StableSort(int (*cmp)(const T* x, const T* y));
+  template <typename CompareFunction>
+  void StableSort(CompareFunction cmp, size_t start, size_t length);
+  template <typename CompareFunction>
+  void StableSort(CompareFunction cmp);
   void StableSort();
 
   INLINE(void Initialize(int capacity,

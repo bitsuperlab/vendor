@@ -6,6 +6,8 @@
  *  lion@9465.net
  */
 
+
+
 #ifndef _ex_thread_h__
 #define _ex_thread_h__
 
@@ -26,6 +28,84 @@
 
 #include <stdint.h>
 #include "utils.h"
+#include "fiber.h"
+
+#ifdef MacOS
+
+class OSTls
+{
+public:
+    OSTls();
+
+    void* operator=(void* new_value)
+    {
+        pthread_setspecific(m_index, new_value);
+        return new_value;
+    }
+
+    operator intptr_t() const
+    {
+        intptr_t result;
+
+#if defined(I386)
+        asm("movl %%gs:(%1,%2,4), %0;"
+            :"=r"(result)
+            :"r"(kMacTlsBaseOffset), "r"(m_index));
+#else
+        asm("movq %%gs:(%1,%2,8), %0;"
+            :"=r"(result)
+            :"r"(kMacTlsBaseOffset), "r"(m_index));
+#endif
+        return result;
+    }
+
+    template<class T>
+    operator T* () const
+    {
+        return (T*)operator intptr_t();
+    }
+
+private:
+    pthread_key_t m_index;
+    static intptr_t kMacTlsBaseOffset;
+};
+
+#elif defined(OpenBSD)
+
+class OSTls
+{
+public:
+    OSTls()
+    {
+        pthread_key_create(&m_index, NULL);
+    }
+
+    void* operator=(void* new_value)
+    {
+        pthread_setspecific(m_index, new_value);
+        return new_value;
+    }
+
+    operator void* () const
+    {
+        return pthread_getspecific(m_index);
+    }
+
+    template<class T>
+    operator T* () const
+    {
+        return (T*)pthread_getspecific(m_index);
+    }
+
+private:
+    pthread_key_t m_index;
+};
+
+#elif defined(_MSC_VER)
+#define OSTls __declspec(thread) void *
+#else
+#define OSTls __thread void *
+#endif
 
 namespace exlib
 {
@@ -69,7 +149,7 @@ public:
 class OSSemaphore
 {
 public:
-    OSSemaphore(int start_val = 0);
+    OSSemaphore(int32_t start_val = 0);
 
     ~OSSemaphore()
     {
@@ -86,7 +166,7 @@ public:
         TimedWait(INFINITE);
     }
 
-    bool TimedWait(int ms)
+    bool TimedWait(int32_t ms)
     {
         return WaitForSingleObject(m_sem, ms) == WAIT_OBJECT_0;
     }
@@ -155,8 +235,8 @@ private:
     OSMutex &user_lock_;
     Event waiting_list_;
     Event recycling_list_;
-    int recycling_list_size_;
-    int allocation_counter_;
+    int32_t recycling_list_size_;
+    int32_t allocation_counter_;
 };
 
 class OSCondVarNew
@@ -228,7 +308,7 @@ public:
 class OSSemaphore
 {
 public:
-    OSSemaphore(int start_val = 0)
+    OSSemaphore(int32_t start_val = 0)
     {
         semaphore_create(mach_task_self(), &m_sem, SYNC_POLICY_FIFO, start_val);
     }
@@ -248,7 +328,7 @@ public:
         semaphore_wait(m_sem);
     }
 
-    bool TimedWait(int ms)
+    bool TimedWait(int32_t ms)
     {
         mach_timespec_t mts;
 
@@ -270,7 +350,7 @@ public:
 class OSSemaphore
 {
 public:
-    OSSemaphore(int start_val = 0)
+    OSSemaphore(int32_t start_val = 0)
     {
         sem_init(&m_sem, 0, start_val);
     }
@@ -295,7 +375,7 @@ public:
         return sem_trywait(&m_sem) == 0;
     }
 
-    bool TimedWait(int ms)
+    bool TimedWait(int32_t ms)
     {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -382,18 +462,35 @@ private:
     OSMutex &_mu;
 };
 
-class OSThread
+class OSThread : public Thread_base
 {
 public:
     OSThread();
     virtual ~OSThread();
 
-    void start();
-    void detach();
-    void join();
-    virtual void Run() = 0;
+public:
+    static const int32_t type = 3;
+    virtual bool is(int32_t t)
+    {
+        return t == type;
+    }
 
-    static void Sleep(int ms)
+    virtual void suspend();
+    virtual void resume();
+    virtual void join();
+    virtual void yield();
+    virtual void Run()
+    {};
+
+private:
+    virtual void destroy();
+
+public:
+    void start();
+    static OSThread *current();
+    void bindCurrent();
+
+    static void sleep(int32_t ms)
     {
 #ifdef _WIN32
         ::Sleep(ms);
@@ -402,6 +499,9 @@ public:
 #endif
     }
 
+private:
+    static void *Entry(void *arg);
+
 public:
 #ifdef _WIN32
     HANDLE thread_;
@@ -409,11 +509,12 @@ public:
 #else
     pthread_t thread_;
 #endif
+    OSSemaphore m_sem;
 };
 
-inline void InitOnce(int32_t *once, void (*initializer)())
+inline void InitOnce(intptr_t *once, void (*initializer)())
 {
-    int32_t state = CompareAndSwap(once, 0, 1);
+    intptr_t state = CompareAndSwap(once, 0, 1);
     if (state == 0)
     {
         initializer();
@@ -422,7 +523,7 @@ inline void InitOnce(int32_t *once, void (*initializer)())
     else if (state == 1)
     {
         while (*once != 2)
-            OSThread::Sleep(0);
+            OSThread::sleep(0);
     }
 }
 

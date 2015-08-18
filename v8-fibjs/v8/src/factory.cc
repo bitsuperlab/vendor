@@ -676,17 +676,9 @@ Handle<Symbol> Factory::NewSymbol() {
 }
 
 
-Handle<Symbol> Factory::NewPrivateSymbol() {
+Handle<Symbol> Factory::NewPrivateSymbol(Handle<Object> name) {
   Handle<Symbol> symbol = NewSymbol();
   symbol->set_is_private(true);
-  return symbol;
-}
-
-
-Handle<Symbol> Factory::NewPrivateOwnSymbol(Handle<Object> name) {
-  Handle<Symbol> symbol = NewSymbol();
-  symbol->set_is_private(true);
-  symbol->set_is_own(true);
   if (name->IsString()) {
     symbol->set_name(*name);
   } else {
@@ -697,7 +689,8 @@ Handle<Symbol> Factory::NewPrivateOwnSymbol(Handle<Object> name) {
 
 
 Handle<Context> Factory::NewNativeContext() {
-  Handle<FixedArray> array = NewFixedArray(Context::NATIVE_CONTEXT_SLOTS);
+  Handle<FixedArray> array =
+      NewFixedArray(Context::NATIVE_CONTEXT_SLOTS, TENURED);
   array->set_map_no_write_barrier(*native_context_map());
   Handle<Context> context = Handle<Context>::cast(array);
   context->set_js_array_maps(*undefined_value());
@@ -852,6 +845,7 @@ Handle<Script> Factory::NewScript(Handle<String> source) {
   script->set_line_ends(heap->undefined_value());
   script->set_eval_from_shared(heap->undefined_value());
   script->set_eval_from_instructions_offset(Smi::FromInt(0));
+  script->set_shared_function_infos(Smi::FromInt(0));
   script->set_flags(Smi::FromInt(0));
 
   return script;
@@ -879,18 +873,24 @@ Handle<ByteArray> Factory::NewByteArray(int length, PretenureFlag pretenure) {
 }
 
 
-Handle<ExternalArray> Factory::NewExternalArray(int length,
-                                                ExternalArrayType array_type,
-                                                void* external_pointer,
-                                                PretenureFlag pretenure) {
+Handle<BytecodeArray> Factory::NewBytecodeArray(int length,
+                                                const byte* raw_bytecodes,
+                                                int frame_size) {
+  DCHECK(0 <= length);
+  CALL_HEAP_FUNCTION(isolate(), isolate()->heap()->AllocateBytecodeArray(
+                                    length, raw_bytecodes, frame_size),
+                     BytecodeArray);
+}
+
+
+Handle<FixedTypedArrayBase> Factory::NewFixedTypedArrayWithExternalPointer(
+    int length, ExternalArrayType array_type, void* external_pointer,
+    PretenureFlag pretenure) {
   DCHECK(0 <= length && length <= Smi::kMaxValue);
   CALL_HEAP_FUNCTION(
-      isolate(),
-      isolate()->heap()->AllocateExternalArray(length,
-                                               array_type,
-                                               external_pointer,
-                                               pretenure),
-      ExternalArray);
+      isolate(), isolate()->heap()->AllocateFixedTypedArrayWithExternalPointer(
+                     length, array_type, external_pointer, pretenure),
+      FixedTypedArrayBase);
 }
 
 
@@ -978,6 +978,15 @@ Handle<FixedArray> Factory::CopyFixedArrayWithMap(Handle<FixedArray> array,
 }
 
 
+Handle<FixedArray> Factory::CopyFixedArrayAndGrow(Handle<FixedArray> array,
+                                                  int grow_by,
+                                                  PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(isolate(), isolate()->heap()->CopyFixedArrayAndGrow(
+                                    *array, grow_by, pretenure),
+                     FixedArray);
+}
+
+
 Handle<FixedArray> Factory::CopyFixedArray(Handle<FixedArray> array) {
   CALL_HEAP_FUNCTION(isolate(),
                      isolate()->heap()->CopyFixedArray(*array),
@@ -1047,11 +1056,50 @@ Handle<HeapNumber> Factory::NewHeapNumber(double value,
 }
 
 
-Handle<Float32x4> Factory::NewFloat32x4(float w, float x, float y, float z,
+Handle<Float32x4> Factory::NewFloat32x4(float lanes[4],
                                         PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(isolate(),
+                     isolate()->heap()->AllocateFloat32x4(lanes, pretenure),
+                     Float32x4);
+}
+
+
+Handle<Int32x4> Factory::NewInt32x4(int32_t lanes[4], PretenureFlag pretenure) {
   CALL_HEAP_FUNCTION(
-      isolate(), isolate()->heap()->AllocateFloat32x4(w, x, y, z, pretenure),
-      Float32x4);
+      isolate(), isolate()->heap()->AllocateInt32x4(lanes, pretenure), Int32x4);
+}
+
+
+Handle<Bool32x4> Factory::NewBool32x4(bool lanes[4], PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(isolate(),
+                     isolate()->heap()->AllocateBool32x4(lanes, pretenure),
+                     Bool32x4);
+}
+
+
+Handle<Int16x8> Factory::NewInt16x8(int16_t lanes[8], PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(
+      isolate(), isolate()->heap()->AllocateInt16x8(lanes, pretenure), Int16x8);
+}
+
+
+Handle<Bool16x8> Factory::NewBool16x8(bool lanes[8], PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(isolate(),
+                     isolate()->heap()->AllocateBool16x8(lanes, pretenure),
+                     Bool16x8);
+}
+
+
+Handle<Int8x16> Factory::NewInt8x16(int8_t lanes[16], PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(
+      isolate(), isolate()->heap()->AllocateInt8x16(lanes, pretenure), Int8x16);
+}
+
+
+Handle<Bool8x16> Factory::NewBool8x16(bool lanes[16], PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(isolate(),
+                     isolate()->heap()->AllocateBool8x16(lanes, pretenure),
+                     Bool8x16);
 }
 
 
@@ -1156,7 +1204,7 @@ Handle<String> Factory::EmergencyNewError(const char* message,
       if (space > 0) {
         Handle<String> arg_str = Handle<String>::cast(
             Object::GetElement(isolate(), args, i).ToHandleChecked());
-        SmartArrayPointer<char> arg = arg_str->ToCString();
+        base::SmartArrayPointer<char> arg = arg_str->ToCString();
         Vector<char> v2(p, static_cast<int>(space));
         StrNCpy(v2, arg.get(), space);
         space -= Min(space, strlen(arg.get()));
@@ -1385,21 +1433,21 @@ Handle<JSFunction> Factory::NewFunctionFromSharedFunctionInfo(
     result->MarkForOptimization();
   }
 
-  int index = info->SearchOptimizedCodeMap(context->native_context(),
-                                           BailoutId::None());
-  if (!info->bound() && index < 0) {
-    int number_of_literals = info->num_literals();
-    Handle<FixedArray> literals = NewFixedArray(number_of_literals, pretenure);
-    result->set_literals(*literals);
+  CodeAndLiterals cached = info->SearchOptimizedCodeMap(
+      context->native_context(), BailoutId::None());
+  if (cached.code != nullptr) {
+    // Caching of optimized code enabled and optimized code found.
+    if (cached.literals != nullptr) result->set_literals(cached.literals);
+    DCHECK(!cached.code->marked_for_deoptimization());
+    DCHECK(result->shared()->is_compiled());
+    result->ReplaceCode(cached.code);
   }
 
-  if (index > 0) {
-    // Caching of optimized code enabled and optimized code found.
-    FixedArray* literals = info->GetLiteralsFromOptimizedCodeMap(index);
-    if (literals != NULL) result->set_literals(literals);
-    Code* code = info->GetCodeFromOptimizedCodeMap(index);
-    DCHECK(!code->marked_for_deoptimization());
-    result->ReplaceCode(code);
+  if (cached.literals == nullptr && !info->bound()) {
+    int number_of_literals = info->num_literals();
+    // TODO(mstarzinger): Consider sharing the newly created literals array.
+    Handle<FixedArray> literals = NewFixedArray(number_of_literals, pretenure);
+    result->set_literals(*literals);
   }
 
   return result;
@@ -1602,14 +1650,12 @@ Handle<GlobalObject> Factory::NewGlobalObject(Handle<JSFunction> constructor) {
 Handle<JSObject> Factory::NewJSObjectFromMap(
     Handle<Map> map,
     PretenureFlag pretenure,
-    bool alloc_props,
     Handle<AllocationSite> allocation_site) {
   CALL_HEAP_FUNCTION(
       isolate(),
       isolate()->heap()->AllocateJSObjectFromMap(
           *map,
           pretenure,
-          alloc_props,
           allocation_site.is_null() ? NULL : *allocation_site),
       JSObject);
 }
@@ -1763,11 +1809,11 @@ ElementsKind GetExternalArrayElementsKind(ExternalArrayType type) {
   switch (type) {
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size) \
   case kExternal##Type##Array:                          \
-    return EXTERNAL_##TYPE##_ELEMENTS;
+    return TYPE##_ELEMENTS;
     TYPED_ARRAYS(TYPED_ARRAY_CASE)
   }
   UNREACHABLE();
-  return FIRST_EXTERNAL_ARRAY_ELEMENTS_KIND;
+  return FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND;
 #undef TYPED_ARRAY_CASE
 }
 
@@ -1909,7 +1955,7 @@ Handle<JSTypedArray> Factory::NewJSTypedArray(ExternalArrayType type,
   Handle<Object> length_object = NewNumberFromSize(length);
   obj->set_length(*length_object);
 
-  Handle<ExternalArray> elements = NewExternalArray(
+  Handle<FixedTypedArrayBase> elements = NewFixedTypedArrayWithExternalPointer(
       static_cast<int>(length), type,
       static_cast<uint8_t*>(buffer->backing_store()) + byte_offset);
   Handle<Map> map = JSObject::GetElementsTransitionMap(obj, elements_kind);
@@ -2008,8 +2054,7 @@ void Factory::ReinitializeJSProxy(Handle<JSProxy> proxy, InstanceType type,
   DCHECK(size_difference >= 0);
 
   // Allocate the backing storage for the properties.
-  int prop_size = map->InitialPropertiesLength();
-  Handle<FixedArray> properties = NewFixedArray(prop_size, TENURED);
+  Handle<FixedArray> properties = empty_fixed_array();
 
   Heap* heap = isolate()->heap();
   MaybeHandle<SharedFunctionInfo> shared;
@@ -2028,7 +2073,7 @@ void Factory::ReinitializeJSProxy(Handle<JSProxy> proxy, InstanceType type,
   if (size_difference > 0) {
     Address address = proxy->address();
     heap->CreateFillerObjectAt(address + map->instance_size(), size_difference);
-    heap->AdjustLiveBytes(address, -size_difference,
+    heap->AdjustLiveBytes(*proxy, -size_difference,
                           Heap::CONCURRENT_TO_SWEEPER);
   }
 
@@ -2062,9 +2107,9 @@ Handle<JSGlobalProxy> Factory::NewUninitializedJSGlobalProxy() {
   Handle<Map> map = NewMap(JS_GLOBAL_PROXY_TYPE, JSGlobalProxy::kSize);
   // Maintain invariant expected from any JSGlobalProxy.
   map->set_is_access_check_needed(true);
-  CALL_HEAP_FUNCTION(isolate(), isolate()->heap()->AllocateJSObjectFromMap(
-                                    *map, NOT_TENURED, false),
-                     JSGlobalProxy);
+  CALL_HEAP_FUNCTION(
+      isolate(), isolate()->heap()->AllocateJSObjectFromMap(*map, NOT_TENURED),
+      JSGlobalProxy);
 }
 
 
@@ -2082,8 +2127,7 @@ void Factory::ReinitializeJSGlobalProxy(Handle<JSGlobalProxy> object,
   DCHECK(map->instance_type() == object->map()->instance_type());
 
   // Allocate the backing storage for the properties.
-  int prop_size = map->InitialPropertiesLength();
-  Handle<FixedArray> properties = NewFixedArray(prop_size, TENURED);
+  Handle<FixedArray> properties = empty_fixed_array();
 
   // In order to keep heap in consistent state there must be no allocations
   // before object re-initialization is finished.
@@ -2279,13 +2323,6 @@ Handle<String> Factory::NumberToString(Handle<Object> number,
 
 
 Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
-  // Get the original code of the function.
-  Handle<Code> code(shared->code());
-
-  // Create a copy of the code before allocating the debug info object to avoid
-  // allocation while setting up the debug info object.
-  Handle<Code> original_code(*Factory::CopyCode(code));
-
   // Allocate initial fixed array for active break points before allocating the
   // debug info object to avoid allocation while setting up the debug info
   // object.
@@ -2298,8 +2335,7 @@ Handle<DebugInfo> Factory::NewDebugInfo(Handle<SharedFunctionInfo> shared) {
   Handle<DebugInfo> debug_info =
       Handle<DebugInfo>::cast(NewStruct(DEBUG_INFO_TYPE));
   debug_info->set_shared(*shared);
-  debug_info->set_original_code(*original_code);
-  debug_info->set_code(*code);
+  debug_info->set_code(shared->code());
   debug_info->set_break_points(*break_points);
 
   // Link debug info to function.

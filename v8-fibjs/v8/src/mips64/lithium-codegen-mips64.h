@@ -251,6 +251,7 @@ class LCodeGen: public LCodeGenBase {
                                    String::Encoding encoding);
 
   void EmitIntegerMathAbs(LMathAbs* instr);
+  void EmitSmiMathAbs(LMathAbs* instr);
 
   // Support for recording safepoint and position information.
   void RecordSafepoint(LPointerMap* pointers,
@@ -355,6 +356,8 @@ class LCodeGen: public LCodeGenBase {
 
   template <class T>
   void EmitVectorLoadICRegisters(T* instr);
+  template <class T>
+  void EmitVectorStoreICRegisters(T* instr);
 
   ZoneList<LEnvironment*> deoptimizations_;
   ZoneList<Deoptimizer::JumpTableEntry*> jump_table_;

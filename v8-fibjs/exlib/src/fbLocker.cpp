@@ -7,88 +7,118 @@
  */
 
 #include "service.h"
+#include <map>
+#include <assert.h>
+
+#ifndef WIN32
+#include <unistd.h>
+#endif
 
 namespace exlib
 {
 
 void Locker::lock()
 {
-    Service *pService = Service::getFiberService();
+    Thread_base *current = Thread_base::current();
 
-    if (pService)
+    assert(current != 0);
+    assert(m_recursive || current != m_locker);
+
+    m_lock.lock();
+
+    if (!m_recursive && current == m_locker)
     {
-        Fiber *current = pService->m_running;
-
-        assert(m_recursive || current != m_locker);
-
-        if (!m_recursive && current == m_locker)
-            return;
-
-        if (m_locker && current != m_locker)
-        {
-            m_blocks.put(current);
-            pService->switchtonext();
-        }
-        else if (++m_count == 1)
-            m_locker = current;
+        m_lock.unlock();
+        return;
     }
+
+    if (m_locker && current != m_locker)
+    {
+        m_blocks.putTail(current);
+        m_lock.unlock();
+
+        current->suspend();
+        return;
+    }
+
+    if (++m_count == 1) {
+        m_locker = current;
+    }
+
+    m_lock.unlock();
 }
 
 bool Locker::trylock()
 {
-    Service *pService = Service::getFiberService();
+    Thread_base *current = Thread_base::current();
 
-    if (pService)
+    assert(current != 0);
+    assert(m_recursive || current != m_locker);
+
+    m_lock.lock();
+
+    if (!m_recursive && current == m_locker)
     {
-        Fiber *current = pService->m_running;
-
-        if (m_locker && current != m_locker)
-            return false;
-
-        if (++m_count == 1)
-            m_locker = current;
+        m_lock.unlock();
+        return false;
     }
+
+    if (m_locker && current != m_locker)
+    {
+        m_lock.unlock();
+        return false;
+    }
+
+    if (++m_count == 1) {
+        m_locker = current;
+    }
+
+    m_lock.unlock();
 
     return true;
 }
 
 void Locker::unlock()
 {
-    Service *pService = Service::getFiberService();
+    Thread_base *current = Thread_base::current();
+    Thread_base *fb = 0;
 
-    if (pService)
+    assert(current != 0);
+
+    assert(current == m_locker);
+    assert(m_recursive || m_count == 1);
+    assert(m_count >= 1);
+
+    m_lock.lock();
+
+    if (--m_count == 0)
     {
-        Fiber *current = pService->m_running;
-
-        assert(current == m_locker);
-        assert(m_recursive || m_count == 1);
-        assert(m_count >= 1);
-
-        if (current == m_locker)
+        if ((m_locker = m_blocks.getHead()) != 0)
         {
-            if (--m_count == 0)
-            {
-                if (m_blocks.empty())
-                    m_locker = NULL;
-                else
-                {
-                    m_count++;
-                    m_locker = m_blocks.get();
-                    pService->m_resume.put(m_locker);
-                }
-            }
+            fb = m_locker;
+            m_count = 1;
         }
     }
+
+    m_lock.unlock();
+
+    if (fb)
+        fb->resume();
 }
 
 bool Locker::owned()
 {
-    Service *pService = Service::getFiberService();
+    Thread_base *current = Thread_base::current();
 
-    if (pService)
-        return pService->m_running == m_locker;
+    assert(current != 0);
 
-    return false;
+    m_lock.lock();
+
+    bool r = current == m_locker;
+
+    m_lock.unlock();
+
+    return r;
 }
 
 }

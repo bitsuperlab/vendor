@@ -19,12 +19,13 @@
 #include "src/compilation-cache.h"
 #include "src/compilation-statistics.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/heap/spaces.h"
 #include "src/heap-profiler.h"
 #include "src/hydrogen.h"
 #include "src/ic/stub-cache.h"
+#include "src/interpreter/interpreter.h"
 #include "src/lithium-allocator.h"
 #include "src/log.h"
 #include "src/messages.h"
@@ -320,7 +321,7 @@ static bool IsVisibleInStackTrace(JSFunction* fun,
     if (receiver->IsJSBuiltinsObject()) return false;
     if (fun->IsBuiltin()) {
       return fun->shared()->native();
-    } else if (fun->IsFromNativeScript() || fun->IsFromExtensionScript()) {
+    } else if (!fun->IsSubjectToDebugging()) {
       return false;
     }
   }
@@ -774,8 +775,7 @@ void Isolate::ReportFailedAccessCheck(Handle<JSObject> receiver) {
 
 bool Isolate::IsInternallyUsedPropertyName(Handle<Object> name) {
   if (name->IsSymbol()) {
-    return Handle<Symbol>::cast(name)->is_private() &&
-           Handle<Symbol>::cast(name)->is_own();
+    return Handle<Symbol>::cast(name)->is_private();
   }
   return name.is_identical_to(factory()->hidden_string());
 }
@@ -783,7 +783,7 @@ bool Isolate::IsInternallyUsedPropertyName(Handle<Object> name) {
 
 bool Isolate::IsInternallyUsedPropertyName(Object* name) {
   if (name->IsSymbol()) {
-    return Symbol::cast(name)->is_private() && Symbol::cast(name)->is_own();
+    return Symbol::cast(name)->is_private();
   }
   return name == heap()->hidden_string();
 }
@@ -1325,7 +1325,7 @@ bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
   for (int i = 1; i < elements_limit; i += 4) {
     Handle<JSFunction> fun =
         handle(JSFunction::cast(elements->get(i + 1)), this);
-    if (fun->IsFromNativeScript()) continue;
+    if (!fun->IsSubjectToDebugging()) continue;
 
     Object* script = fun->shared()->script();
     if (script->IsScript() &&
@@ -1760,7 +1760,6 @@ Isolate::Isolate(bool enable_serializer)
       eternal_handles_(NULL),
       thread_manager_(NULL),
       has_installed_extensions_(false),
-      string_tracker_(NULL),
       regexp_stack_(NULL),
       date_cache_(NULL),
       call_descriptor_data_(NULL),
@@ -1892,6 +1891,9 @@ void Isolate::Deinit() {
   Sampler* sampler = logger_->sampler();
   if (sampler && sampler->IsActive()) sampler->Stop();
 
+  delete interpreter_;
+  interpreter_ = NULL;
+
   delete deoptimizer_data_;
   deoptimizer_data_ = NULL;
   builtins_.TearDown();
@@ -1904,6 +1906,11 @@ void Isolate::Deinit() {
 
   delete basic_block_profiler_;
   basic_block_profiler_ = NULL;
+
+  for (Cancelable* task : cancelable_tasks_) {
+    task->Cancel();
+  }
+  cancelable_tasks_.clear();
 
   heap_.TearDown();
   logger_->TearDown();
@@ -1986,9 +1993,6 @@ Isolate::~Isolate() {
 
   delete thread_manager_;
   thread_manager_ = NULL;
-
-  delete string_tracker_;
-  string_tracker_ = NULL;
 
   delete memory_allocator_;
   memory_allocator_ = NULL;
@@ -2096,8 +2100,6 @@ bool Isolate::Init(Deserializer* des) {
   FOR_EACH_ISOLATE_ADDRESS_NAME(ASSIGN_ELEMENT)
 #undef ASSIGN_ELEMENT
 
-  string_tracker_ = new StringTracker();
-  string_tracker_->isolate_ = this;
   compilation_cache_ = new CompilationCache(this);
   keyed_lookup_cache_ = new KeyedLookupCache();
   context_slot_cache_ = new ContextSlotCache();
@@ -2117,6 +2119,7 @@ bool Isolate::Init(Deserializer* des) {
       new CallInterfaceDescriptorData[CallDescriptors::NUMBER_OF_DESCRIPTORS];
   cpu_profiler_ = new CpuProfiler(this);
   heap_profiler_ = new HeapProfiler(heap());
+  interpreter_ = new interpreter::Interpreter(this);
 
   // Enable logging before setting up the heap
   logger_->SetUp(this);
@@ -2164,6 +2167,10 @@ bool Isolate::Init(Deserializer* des) {
   bootstrapper_->Initialize(create_heap_objects);
   builtins_.SetUp(this, create_heap_objects);
 
+  if (FLAG_ignition) {
+    interpreter_->Initialize(create_heap_objects);
+  }
+
   if (FLAG_log_internal_timer_events) {
     set_event_logger(Logger::DefaultEventLoggerSentinel);
   }
@@ -2177,6 +2184,12 @@ bool Isolate::Init(Deserializer* des) {
   // Initialize runtime profiler before deserialization, because collections may
   // occur, clearing/updating ICs.
   runtime_profiler_ = new RuntimeProfiler(this);
+
+  if (create_heap_objects) {
+    if (!bootstrapper_->CreateCodeStubContext(this)) {
+      return false;
+    }
+  }
 
   // If we are deserializing, read the state into the now-empty heap.
   if (!create_heap_objects) {
@@ -2432,7 +2445,9 @@ bool Isolate::IsFastArrayConstructorPrototypeChainIntact() {
     return cell_reports_intact;
   }
 
-  if (initial_array_proto->elements() != heap()->empty_fixed_array()) {
+  FixedArrayBase* elements = initial_array_proto->elements();
+  if (elements != heap()->empty_fixed_array() &&
+      elements != heap()->empty_slow_element_dictionary()) {
     DCHECK_EQ(false, cell_reports_intact);
     return cell_reports_intact;
   }
@@ -2443,7 +2458,10 @@ bool Isolate::IsFastArrayConstructorPrototypeChainIntact() {
     DCHECK_EQ(false, cell_reports_intact);
     return cell_reports_intact;
   }
-  if (initial_object_proto->elements() != heap()->empty_fixed_array()) {
+
+  elements = initial_object_proto->elements();
+  if (elements != heap()->empty_fixed_array() &&
+      elements != heap()->empty_slow_element_dictionary()) {
     DCHECK_EQ(false, cell_reports_intact);
     return cell_reports_intact;
   }
@@ -2619,7 +2637,7 @@ void Isolate::EnqueueMicrotask(Handle<Object> microtask) {
     queue = factory()->NewFixedArray(8);
     heap()->set_microtask_queue(*queue);
   } else if (num_tasks == queue->length()) {
-    queue = FixedArray::CopySize(queue, num_tasks * 2);
+    queue = factory()->CopyFixedArrayAndGrow(queue, num_tasks);
     heap()->set_microtask_queue(*queue);
   }
   DCHECK(queue->get(num_tasks)->IsUndefined());
@@ -2629,13 +2647,6 @@ void Isolate::EnqueueMicrotask(Handle<Object> microtask) {
 
 
 void Isolate::RunMicrotasks() {
-  // %RunMicrotasks may be called in mjsunit tests, which violates
-  // this assertion, hence the check for --allow-natives-syntax.
-  // TODO(adamk): However, this also fails some layout tests.
-  //
-  // DCHECK(FLAG_allow_natives_syntax ||
-  //        handle_scope_implementer()->CallDepthIsZero());
-
   // Increase call depth to prevent recursive callbacks.
   v8::Isolate::SuppressMicrotaskExecutionScope suppress(
       reinterpret_cast<v8::Isolate*>(this));
@@ -2727,7 +2738,7 @@ void Isolate::AddDetachedContext(Handle<Context> context) {
   Handle<WeakCell> cell = factory()->NewWeakCell(context);
   Handle<FixedArray> detached_contexts(heap()->detached_contexts());
   int length = detached_contexts->length();
-  detached_contexts = FixedArray::CopySize(detached_contexts, length + 2);
+  detached_contexts = factory()->CopyFixedArrayAndGrow(detached_contexts, 2);
   detached_contexts->set(length, Smi::FromInt(0));
   detached_contexts->set(length + 1, *cell);
   heap()->set_detached_contexts(*detached_contexts);
@@ -2773,15 +2784,27 @@ void Isolate::CheckDetachedContextsAfterGC() {
 }
 
 
-bool StackLimitCheck::JsHasOverflowed() const {
+void Isolate::RegisterCancelableTask(Cancelable* task) {
+  cancelable_tasks_.insert(task);
+}
+
+
+void Isolate::RemoveCancelableTask(Cancelable* task) {
+  auto removed = cancelable_tasks_.erase(task);
+  USE(removed);
+  DCHECK(removed == 1);
+}
+
+
+bool StackLimitCheck::JsHasOverflowed(uintptr_t gap) const {
   StackGuard* stack_guard = isolate_->stack_guard();
 #ifdef USE_SIMULATOR
   // The simulator uses a separate JS stack.
   Address jssp_address = Simulator::current(isolate_)->get_sp();
   uintptr_t jssp = reinterpret_cast<uintptr_t>(jssp_address);
-  if (jssp < stack_guard->real_jslimit()) return true;
+  if (jssp - gap < stack_guard->real_jslimit()) return true;
 #endif  // USE_SIMULATOR
-  return GetCurrentStackPosition() < stack_guard->real_climit();
+  return GetCurrentStackPosition() - gap < stack_guard->real_climit();
 }
 
 

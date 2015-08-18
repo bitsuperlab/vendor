@@ -54,8 +54,14 @@ bool Expression::IsUndefinedLiteral(Isolate* isolate) const {
   Variable* var = var_proxy->var();
   // The global identifier "undefined" is immutable. Everything
   // else could be reassigned.
-  return var != NULL && var->location() == Variable::UNALLOCATED &&
+  return var != NULL && var->IsUnallocatedOrGlobalSlot() &&
          var_proxy->raw_name()->IsOneByteEqualTo("undefined");
+}
+
+
+bool Expression::IsValidReferenceExpressionOrThis() const {
+  return IsValidReferenceExpression() ||
+         (IsVariableProxy() && AsVariableProxy()->is_this());
 }
 
 
@@ -241,25 +247,6 @@ bool FunctionLiteral::NeedsHomeObject(Expression* expr) {
 }
 
 
-// Helper to find an existing shared function info in the baseline code for the
-// given function literal. Used to canonicalize SharedFunctionInfo objects.
-void FunctionLiteral::InitializeSharedInfo(
-    Handle<Code> unoptimized_code) {
-  for (RelocIterator it(*unoptimized_code); !it.done(); it.next()) {
-    RelocInfo* rinfo = it.rinfo();
-    if (rinfo->rmode() != RelocInfo::EMBEDDED_OBJECT) continue;
-    Object* obj = rinfo->target_object();
-    if (obj->IsSharedFunctionInfo()) {
-      SharedFunctionInfo* shared = SharedFunctionInfo::cast(obj);
-      if (shared->start_position() == start_position()) {
-        shared_info_ = Handle<SharedFunctionInfo>(shared);
-        break;
-      }
-    }
-  }
-}
-
-
 ObjectLiteralProperty::ObjectLiteralProperty(Expression* key, Expression* value,
                                              Kind kind, bool is_static,
                                              bool is_computed_name)
@@ -306,6 +293,10 @@ FeedbackVectorRequirements ClassLiteral::ComputeFeedbackRequirements(
 
     Expression* value = property->value();
     if (FunctionLiteral::NeedsHomeObject(value)) ic_slots++;
+  }
+
+  if (scope() != NULL && class_variable_proxy()->var()->IsUnallocated()) {
+    ic_slots++;
   }
 
 #ifdef DEBUG
@@ -520,19 +511,22 @@ void ObjectLiteral::BuildConstantProperties(Isolate* isolate) {
 void ArrayLiteral::BuildConstantElements(Isolate* isolate) {
   if (!constant_elements_.is_null()) return;
 
+  int constants_length =
+      first_spread_index_ >= 0 ? first_spread_index_ : values()->length();
+
   // Allocate a fixed array to hold all the object literals.
-  Handle<JSArray> array =
-      isolate->factory()->NewJSArray(0, FAST_HOLEY_SMI_ELEMENTS);
-  JSArray::Expand(array, values()->length());
+  Handle<JSArray> array = isolate->factory()->NewJSArray(
+      FAST_HOLEY_SMI_ELEMENTS, constants_length, constants_length,
+      Strength::WEAK, INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE);
 
   // Fill in the literals.
   bool is_simple = true;
   int depth_acc = 1;
   bool is_holey = false;
   int array_index = 0;
-  for (int n = values()->length(); array_index < n; array_index++) {
+  for (; array_index < constants_length; array_index++) {
     Expression* element = values()->at(array_index);
-    if (element->IsSpread()) break;
+    DCHECK(!element->IsSpread());
     MaterializedLiteral* m_literal = element->AsMaterializedLiteral();
     if (m_literal != NULL) {
       m_literal->BuildConstants(isolate);
@@ -540,8 +534,10 @@ void ArrayLiteral::BuildConstantElements(Isolate* isolate) {
         depth_acc = m_literal->depth() + 1;
       }
     }
-    Handle<Object> boilerplate_value = GetBoilerplateValue(element, isolate);
 
+    // New handle scope here, needs to be after BuildContants().
+    HandleScope scope(isolate);
+    Handle<Object> boilerplate_value = GetBoilerplateValue(element, isolate);
     if (boilerplate_value->IsTheHole()) {
       is_holey = true;
       continue;
@@ -556,10 +552,7 @@ void ArrayLiteral::BuildConstantElements(Isolate* isolate) {
         .Assert();
   }
 
-  if (array_index != values()->length()) {
-    JSArray::SetElementsLength(
-        array, handle(Smi::FromInt(array_index), isolate)).Assert();
-  }
+  JSObject::ValidateElements(array);
   Handle<FixedArrayBase> element_values(array->elements());
 
   // Simple and shallow arrays can be lazily copied, we transform the
@@ -765,7 +758,7 @@ Call::CallType Call::GetCallType(Isolate* isolate) const {
   if (proxy != NULL) {
     if (proxy->var()->is_possibly_eval(isolate)) {
       return POSSIBLY_EVAL_CALL;
-    } else if (proxy->var()->IsUnallocated()) {
+    } else if (proxy->var()->IsUnallocatedOrGlobalSlot()) {
       return GLOBAL_CALL;
     } else if (proxy->var()->IsLookupSlot()) {
       return LOOKUP_SLOT_CALL;

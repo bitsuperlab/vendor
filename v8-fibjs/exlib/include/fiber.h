@@ -10,158 +10,258 @@
 #define _ex_fiber_h__
 
 #include "osconfig.h"
-#include "event.h"
+#include <stdint.h>
+#include <string.h>
+#include <string>
+#include "list.h"
 
 namespace exlib
 {
 
-#pragma pack (1)
-
-#if defined(x64)
-
-typedef unsigned long long reg_type;
-
-typedef struct
-{
-    reg_type Rbp;
-    reg_type Rbx;
-    reg_type Rcx;
-    reg_type Rdx;
-    reg_type Rsi;
-    reg_type Rdi;
-    reg_type R12;
-    reg_type R13;
-    reg_type R14;
-    reg_type R15;
-    reg_type Rsp;
-    reg_type Rip;
-} context;
-
-#elif defined(I386)
-
-typedef unsigned long reg_type;
-
-typedef struct __JUMP_BUFFER
-{
-    reg_type Ebp;
-    reg_type Ebx;
-    reg_type Ecx;
-    reg_type Edx;
-    reg_type Esi;
-    reg_type Edi;
-    reg_type Esp;
-    reg_type Eip;
-} context;
-
-#elif defined(arm)
-
-typedef unsigned long reg_type;
-
-typedef struct __JUMP_BUFFER
-{
-    reg_type r0;
-    reg_type r1;
-    reg_type r2;
-    reg_type r3;
-    reg_type r4;
-    reg_type r5;
-    reg_type r6;
-    reg_type r7;
-    reg_type r8;
-    reg_type r9;
-    reg_type r10;
-    reg_type r11;
-    reg_type r12;
-    reg_type r13;
-    reg_type r14;
-} context;
-
-#endif
-#pragma pack ()
-
 #define TLS_SIZE    8
 
-#define FIBER_STACK_SIZE    (65536 * 2)
-
-class AsyncEvent : public linkitem
+class Locker;
+class Thread_base : public linkitem
 {
 public:
-    virtual ~AsyncEvent()
-    {}
-
-    virtual int post(int v);
-    virtual int apost(int v)
+    Thread_base() : refs_(0), m_stackguard(0)
     {
-        return post(v);
+        memset(&m_tls, 0, sizeof(m_tls));
     }
 
-    virtual void callback()
-    {
-        weak.set();
-    }
-
-    int wait()
-    {
-        weak.wait();
-        return m_v;
-    }
-
-    bool isSet()
-    {
-        return weak.isSet();
-    }
-
-    int result()
-    {
-        return m_v;
-    }
-
-    void sleep(int ms);
-
-private:
-    Event weak;
-    int m_v;
-};
-
-class Fiber : public linkitem
-{
 public:
     void Ref()
     {
-        refs_++;
+        refs_.inc();
     }
 
     void Unref()
     {
-        if (--refs_ == 0)
+        if (refs_.dec() == 0)
             destroy();
     }
 
-    void join()
+    void saveStackGuard()
     {
-        m_joins.wait();
+        assert(m_stackguard == 0);
+
+        intptr_t stack_value;
+        m_stackguard = (intptr_t)&stack_value + sizeof(stack_value) * 6;
+    }
+
+    intptr_t stackguard()
+    {
+        assert(m_stackguard != 0);
+        return m_stackguard;
+    }
+
+    static Thread_base* current();
+
+public:
+    virtual bool is(int32_t t) = 0;
+    virtual void suspend() = 0;
+    virtual void resume() = 0;
+    virtual void join() = 0;
+    virtual void yield() = 0;
+
+private:
+    virtual void destroy() = 0;
+
+public:
+    static int32_t tlsAlloc();
+    static void *tlsGet(int32_t idx);
+    static void tlsPut(int32_t idx, void *v);
+    static void tlsFree(int32_t idx);
+
+private:
+    void *m_tls[TLS_SIZE];
+    atomic refs_;
+    intptr_t m_stackguard;
+};
+
+class Locker
+{
+public:
+    Locker(bool recursive = true) :
+        m_recursive(recursive), m_count(0), m_locker(0)
+    {
     }
 
 public:
-    static void sleep(int ms);
-    static void yield();
-    static Fiber *Current();
-    static Fiber *Create(void *(*func)(void *), void *data = 0,
-                         int stacksize = FIBER_STACK_SIZE);
-
-    static int tlsAlloc();
-    static void *tlsGet(int idx);
-    static void tlsPut(int idx, void *v);
-    static void tlsFree(int idx);
+    void lock();
+    void unlock();
+    bool trylock();
+    bool owned();
 
 private:
-    void destroy();
+    bool m_recursive;
+    int32_t m_count;
+    spinlock m_lock;
+    List<Thread_base> m_blocks;
+    Thread_base *m_locker;
+};
+
+class autoLocker
+{
+public:
+    autoLocker(Locker &l) :
+        m_l(l)
+    {
+        m_l.lock();
+    }
+
+    ~autoLocker()
+    {
+        m_l.unlock();
+    }
+
+private:
+    Locker &m_l;
+};
+
+class Event
+{
+public:
+    Event()
+    {
+        m_set = false;
+    }
 
 public:
-    reg_type refs_;
+    void wait();
+    void pulse();
+    void set();
+    void reset();
+    bool isSet();
+
+private:
+    bool m_set;
+    spinlock m_lock;
+    List<Thread_base> m_blocks;
+};
+
+class CondVar
+{
+public:
+    void wait(Locker &l);
+    void notify_one();
+    void notify_all();
+
+private:
+    spinlock m_lock;
+    List<Thread_base> m_blocks;
+};
+
+class Semaphore
+{
+public:
+    Semaphore(int32_t count = 0) :
+        m_count(count)
+    {
+    }
+
+public:
+    void wait();
+    void post();
+    bool trywait();
+
+private:
+    int32_t m_count;
+    spinlock m_lock;
+    List<Thread_base> m_blocks;
+};
+
+template<class T>
+class Queue
+{
+public:
+    void put(T *pNew)
+    {
+        m_list.putTail(pNew);
+        m_sem.post();
+    }
+
+    T *get()
+    {
+        m_sem.wait();
+        return m_list.getHead();
+    }
+
+    T *tryget()
+    {
+        if (!m_sem.trywait())
+            return 0;
+        return m_list.getHead();
+    }
+
+    bool empty()
+    {
+        return m_list.empty();
+    }
+
+    int32_t count()
+    {
+        return m_list.count();
+    }
+
+public:
+    LockedList<T> m_list;
+    Semaphore m_sem;
+};
+
+#define FIBER_STACK_SIZE    (65536 * 2)
+
+class Service;
+
+class Fiber : public Thread_base
+{
+public:
+    Fiber(Service* pService) : m_pService(pService)
+    {
+        memset(&m_cntxt, 0, sizeof(m_cntxt));
+        memset(&name_, 0, sizeof(name_));
+    }
+
+public:
+    static const int32_t type = 3;
+    virtual bool is(int32_t t)
+    {
+        return t == type;
+    }
+
+    virtual void suspend();
+    virtual void resume();
+    virtual void join();
+    virtual void yield();
+
+private:
+    virtual void destroy();
+
+public:
+    void set_name(const char *name)
+    {
+        strncpy(name_, name, sizeof(name_));
+        name_[sizeof(name_) - 1] = '\0';
+    }
+
+    const char* name()
+    {
+        return name_;
+    }
+
+public:
+    static void sleep(int32_t ms);
+    static Fiber *current();
+    static Fiber *Create(void *(*func)(void *), void *data = 0,
+                         int32_t stacksize = FIBER_STACK_SIZE);
+
+public:
     context m_cntxt;
     Event m_joins;
-    void *m_tls[TLS_SIZE];
+    Service* m_pService;
+    char name_[16];
+
+    linkitem m_link;
 };
 
 }

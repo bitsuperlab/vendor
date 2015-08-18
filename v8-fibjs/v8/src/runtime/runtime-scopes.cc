@@ -86,12 +86,12 @@ static Object* DeclareGlobals(Isolate* isolate, Handle<GlobalObject> global,
 
 RUNTIME_FUNCTION(Runtime_DeclareGlobals) {
   HandleScope scope(isolate);
-  DCHECK(args.length() == 3);
+  DCHECK_EQ(2, args.length());
   Handle<GlobalObject> global(isolate->global_object());
+  Handle<Context> context(isolate->context());
 
-  CONVERT_ARG_HANDLE_CHECKED(Context, context, 0);
-  CONVERT_ARG_HANDLE_CHECKED(FixedArray, pairs, 1);
-  CONVERT_SMI_ARG_CHECKED(flags, 2);
+  CONVERT_ARG_HANDLE_CHECKED(FixedArray, pairs, 0);
+  CONVERT_SMI_ARG_CHECKED(flags, 1);
 
   // Traverse the name/value pairs and set the properties.
   int length = pairs->length();
@@ -202,20 +202,16 @@ RUNTIME_FUNCTION(Runtime_InitializeConstGlobal) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_DeclareLookupSlot) {
-  HandleScope scope(isolate);
-  DCHECK(args.length() == 4);
+namespace {
 
+Object* DeclareLookupSlot(Isolate* isolate, Handle<String> name,
+                          Handle<Object> initial_value,
+                          PropertyAttributes attr) {
   // Declarations are always made in a function, eval or script context. In
   // the case of eval code, the context passed is the context of the caller,
   // which may be some nested context and not the declaration context.
-  CONVERT_ARG_HANDLE_CHECKED(Context, context_arg, 0);
-  Handle<Context> context(context_arg->declaration_context());
-  CONVERT_ARG_HANDLE_CHECKED(String, name, 1);
-  CONVERT_SMI_ARG_CHECKED(attr_arg, 2);
-  PropertyAttributes attr = static_cast<PropertyAttributes>(attr_arg);
-  RUNTIME_ASSERT(attr == READ_ONLY || attr == NONE);
-  CONVERT_ARG_HANDLE_CHECKED(Object, initial_value, 3);
+  Handle<Context> context_arg(isolate->context(), isolate);
+  Handle<Context> context(context_arg->declaration_context(), isolate);
 
   // TODO(verwaest): Unify the encoding indicating "var" with DeclareGlobals.
   bool is_var = *initial_value == NULL;
@@ -230,6 +226,10 @@ RUNTIME_FUNCTION(Runtime_DeclareLookupSlot) {
   BindingFlags binding_flags;
   Handle<Object> holder =
       context->Lookup(name, flags, &index, &attributes, &binding_flags);
+  if (holder.is_null()) {
+    // In case of JSProxy, an exception might have been thrown.
+    if (isolate->has_pending_exception()) return isolate->heap()->exception();
+  }
 
   Handle<JSObject> object;
   Handle<Object> value =
@@ -290,6 +290,28 @@ RUNTIME_FUNCTION(Runtime_DeclareLookupSlot) {
   return isolate->heap()->undefined_value();
 }
 
+}  // namespace
+
+
+RUNTIME_FUNCTION(Runtime_DeclareLookupSlot) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Object, initial_value, 1);
+
+  return DeclareLookupSlot(isolate, name, initial_value, NONE);
+}
+
+
+RUNTIME_FUNCTION(Runtime_DeclareReadOnlyLookupSlot) {
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
+  CONVERT_ARG_HANDLE_CHECKED(Object, initial_value, 1);
+
+  return DeclareLookupSlot(isolate, name, initial_value, READ_ONLY);
+}
+
 
 RUNTIME_FUNCTION(Runtime_InitializeLegacyConstLookupSlot) {
   HandleScope scope(isolate);
@@ -308,6 +330,10 @@ RUNTIME_FUNCTION(Runtime_InitializeLegacyConstLookupSlot) {
   BindingFlags binding_flags;
   Handle<Object> holder =
       context->Lookup(name, flags, &index, &attributes, &binding_flags);
+  if (holder.is_null()) {
+    // In case of JSProxy, an exception might have been thrown.
+    if (isolate->has_pending_exception()) return isolate->heap()->exception();
+  }
 
   if (index >= 0) {
     DCHECK(holder->IsContext());
@@ -383,11 +409,7 @@ static Handle<JSObject> NewSloppyArguments(Isolate* isolate,
       Handle<FixedArray> parameter_map =
           isolate->factory()->NewFixedArray(mapped_count + 2, NOT_TENURED);
       parameter_map->set_map(isolate->heap()->sloppy_arguments_elements_map());
-
-      Handle<Map> map = Map::Copy(handle(result->map()), "NewSloppyArguments");
-      map->set_elements_kind(SLOPPY_ARGUMENTS_ELEMENTS);
-
-      result->set_map(*map);
+      result->set_map(isolate->native_context()->fast_aliased_arguments_map());
       result->set_elements(*parameter_map);
 
       // Store the context and the arguments array at the beginning of the
@@ -636,7 +658,6 @@ RUNTIME_FUNCTION(Runtime_NewScriptContext) {
   Handle<ScriptContextTable> script_context_table(
       native_context->script_context_table());
 
-  Handle<String> clashed_name;
   Object* name_clash_result =
       FindNameClash(scope_info, global_object, script_context_table);
   if (isolate->has_pending_exception()) return name_clash_result;
@@ -644,12 +665,16 @@ RUNTIME_FUNCTION(Runtime_NewScriptContext) {
   // Script contexts have a canonical empty function as their closure, not the
   // anonymous closure containing the global code.  See
   // FullCodeGenerator::PushFunctionArgumentForContextAllocation.
-  Handle<JSFunction> closure(native_context->closure());
+  Handle<JSFunction> closure(global_object->IsJSBuiltinsObject()
+                                 ? *function
+                                 : native_context->closure());
   Handle<Context> result =
       isolate->factory()->NewScriptContext(closure, scope_info);
 
+  result->InitializeGlobalSlots();
+
   DCHECK(function->context() == isolate->context());
-  DCHECK(function->context()->global_object() == result->global_object());
+  DCHECK(*global_object == result->global_object());
 
   Handle<ScriptContextTable> new_script_context_table =
       ScriptContextTable::Extend(script_context_table, result);
@@ -823,7 +848,6 @@ RUNTIME_FUNCTION(Runtime_DeclareModules) {
           USE(result);
           break;
         }
-        case INTERNAL:
         case TEMPORARY:
         case DYNAMIC:
         case DYNAMIC_GLOBAL:
@@ -856,6 +880,8 @@ RUNTIME_FUNCTION(Runtime_DeleteLookupSlot) {
 
   // If the slot was not found the result is true.
   if (holder.is_null()) {
+    // In case of JSProxy, an exception might have been thrown.
+    if (isolate->has_pending_exception()) return isolate->heap()->exception();
     return isolate->heap()->true_value();
   }
 
@@ -1010,11 +1036,19 @@ RUNTIME_FUNCTION(Runtime_StoreLookupSlot) {
   BindingFlags binding_flags;
   Handle<Object> holder =
       context->Lookup(name, flags, &index, &attributes, &binding_flags);
-  // In case of JSProxy, an exception might have been thrown.
-  if (isolate->has_pending_exception()) return isolate->heap()->exception();
+  if (holder.is_null()) {
+    // In case of JSProxy, an exception might have been thrown.
+    if (isolate->has_pending_exception()) return isolate->heap()->exception();
+  }
 
   // The property was found in a context slot.
   if (index >= 0) {
+    if ((binding_flags == MUTABLE_CHECK_INITIALIZED ||
+         binding_flags == IMMUTABLE_CHECK_INITIALIZED_HARMONY) &&
+        Handle<Context>::cast(holder)->is_the_hole(index)) {
+      THROW_NEW_ERROR_RETURN_FAILURE(
+          isolate, NewReferenceError(MessageTemplate::kNotDefined, name));
+    }
     if ((attributes & READ_ONLY) == 0) {
       Handle<Context>::cast(holder)->set(index, *value);
     } else if (is_strict(language_mode)) {
@@ -1048,7 +1082,16 @@ RUNTIME_FUNCTION(Runtime_StoreLookupSlot) {
 }
 
 
-RUNTIME_FUNCTION(Runtime_GetArgumentsProperty) {
+RUNTIME_FUNCTION(Runtime_ArgumentsLength) {
+  SealHandleScope shs(isolate);
+  DCHECK(args.length() == 0);
+  JavaScriptFrameIterator it(isolate);
+  JavaScriptFrame* frame = it.frame();
+  return Smi::FromInt(frame->GetArgumentsLength());
+}
+
+
+RUNTIME_FUNCTION(Runtime_Arguments) {
   SealHandleScope shs(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(Object, raw_key, 0);
@@ -1122,21 +1165,6 @@ RUNTIME_FUNCTION(Runtime_GetArgumentsProperty) {
       isolate, result,
       Object::GetProperty(isolate->initial_object_prototype(), key));
   return *result;
-}
-
-
-RUNTIME_FUNCTION(Runtime_ArgumentsLength) {
-  SealHandleScope shs(isolate);
-  DCHECK(args.length() == 0);
-  JavaScriptFrameIterator it(isolate);
-  JavaScriptFrame* frame = it.frame();
-  return Smi::FromInt(frame->GetArgumentsLength());
-}
-
-
-RUNTIME_FUNCTION(Runtime_Arguments) {
-  SealHandleScope shs(isolate);
-  return __RT_impl_Runtime_GetArgumentsProperty(args, isolate);
 }
 }  // namespace internal
 }  // namespace v8

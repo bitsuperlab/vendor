@@ -103,12 +103,15 @@ inline void StoreSeqCst(uint64_t* p, uint64_t value) {
 
 #elif V8_CC_MSVC
 
-#define _InterlockedCompareExchange32 _InterlockedCompareExchange
-#define _InterlockedExchange32 _InterlockedExchange
-#define _InterlockedExchangeAdd32 _InterlockedExchangeAdd
-#define _InterlockedAnd32 _InterlockedAnd
-#define _InterlockedOr32 _InterlockedOr
-#define _InterlockedXor32 _InterlockedXor
+#define InterlockedCompareExchange32 _InterlockedCompareExchange
+#define InterlockedExchange32 _InterlockedExchange
+#define InterlockedExchangeAdd32 _InterlockedExchangeAdd
+#define InterlockedAnd32 _InterlockedAnd
+#define InterlockedOr32 _InterlockedOr
+#define InterlockedXor32 _InterlockedXor
+#define InterlockedExchangeAdd16 _InterlockedExchangeAdd16
+#define InterlockedCompareExchange8 _InterlockedCompareExchange8
+#define InterlockedExchangeAdd8 _InterlockedExchangeAdd8
 
 #define INTEGER_TYPES(V)                           \
   V(int8_t, 8, char)                               \
@@ -120,52 +123,54 @@ inline void StoreSeqCst(uint64_t* p, uint64_t value) {
   V(int64_t, 64, LONGLONG)                         \
   V(uint64_t, 64, LONGLONG)
 
-#define ATOMIC_OPS(type, suffix, vctype)                                       \
-  inline type CompareExchangeSeqCst(volatile type* p, type oldval,             \
-                                    type newval) {                             \
-    return _InterlockedCompareExchange##suffix(                                \
-        reinterpret_cast<volatile vctype*>(p), bit_cast<vctype>(newval),       \
-        bit_cast<vctype>(oldval));                                             \
-  }                                                                            \
-  inline type LoadSeqCst(volatile type* p) { return *p; }                      \
-  inline void StoreSeqCst(volatile type* p, type value) {                      \
-    _InterlockedExchange##suffix(reinterpret_cast<volatile vctype*>(p),        \
-                                 bit_cast<vctype>(value));                     \
-  }                                                                            \
-  inline type AddSeqCst(volatile type* p, type value) {                        \
-    return _InterlockedExchangeAdd##suffix(                                    \
-        reinterpret_cast<volatile vctype*>(p), bit_cast<vctype>(value));       \
-  }                                                                            \
-  inline type SubSeqCst(volatile type* p, type value) {                        \
-    return _InterlockedExchangeAdd##suffix(                                    \
-        reinterpret_cast<volatile vctype*>(p), -bit_cast<vctype>(value));      \
-  }                                                                            \
-  inline type AndSeqCst(volatile type* p, type value) {                        \
-    return _InterlockedAnd##suffix(reinterpret_cast<volatile vctype*>(p),      \
-                                   bit_cast<vctype>(value));                   \
-  }                                                                            \
-  inline type OrSeqCst(volatile type* p, type value) {                         \
-    return _InterlockedOr##suffix(reinterpret_cast<volatile vctype*>(p),       \
-                                  bit_cast<vctype>(value));                    \
-  }                                                                            \
-  inline type XorSeqCst(volatile type* p, type value) {                        \
-    return _InterlockedXor##suffix(reinterpret_cast<volatile vctype*>(p),      \
-                                   bit_cast<vctype>(value));                   \
-  }                                                                            \
-  inline type ExchangeSeqCst(volatile type* p, type value) {                   \
-    return _InterlockedExchange##suffix(reinterpret_cast<volatile vctype*>(p), \
-                                        bit_cast<vctype>(value));              \
+#define ATOMIC_OPS(type, suffix, vctype)                                    \
+  inline type CompareExchangeSeqCst(type* p, type oldval, type newval) {    \
+    return InterlockedCompareExchange##suffix(reinterpret_cast<vctype*>(p), \
+                                              bit_cast<vctype>(newval),     \
+                                              bit_cast<vctype>(oldval));    \
+  }                                                                         \
+  inline type LoadSeqCst(type* p) { return *p; }                            \
+  inline void StoreSeqCst(type* p, type value) {                            \
+    InterlockedExchange##suffix(reinterpret_cast<vctype*>(p),               \
+                                bit_cast<vctype>(value));                   \
+  }                                                                         \
+  inline type AddSeqCst(type* p, type value) {                              \
+    return InterlockedExchangeAdd##suffix(reinterpret_cast<vctype*>(p),     \
+                                          bit_cast<vctype>(value));         \
+  }                                                                         \
+  inline type SubSeqCst(type* p, type value) {                              \
+    return InterlockedExchangeAdd##suffix(reinterpret_cast<vctype*>(p),     \
+                                          -bit_cast<vctype>(value));        \
+  }                                                                         \
+  inline type AndSeqCst(type* p, type value) {                              \
+    return InterlockedAnd##suffix(reinterpret_cast<vctype*>(p),             \
+                                  bit_cast<vctype>(value));                 \
+  }                                                                         \
+  inline type OrSeqCst(type* p, type value) {                               \
+    return InterlockedOr##suffix(reinterpret_cast<vctype*>(p),              \
+                                 bit_cast<vctype>(value));                  \
+  }                                                                         \
+  inline type XorSeqCst(type* p, type value) {                              \
+    return InterlockedXor##suffix(reinterpret_cast<vctype*>(p),             \
+                                  bit_cast<vctype>(value));                 \
+  }                                                                         \
+  inline type ExchangeSeqCst(type* p, type value) {                         \
+    return InterlockedExchange##suffix(reinterpret_cast<vctype*>(p),        \
+                                       bit_cast<vctype>(value));            \
   }
 INTEGER_TYPES(ATOMIC_OPS)
 #undef ATOMIC_OPS
 
 #undef INTEGER_TYPES
-#undef _InterlockedCompareExchange32
-#undef _InterlockedExchange32
-#undef _InterlockedExchangeAdd32
-#undef _InterlockedAnd32
-#undef _InterlockedOr32
-#undef _InterlockedXor32
+#undef InterlockedCompareExchange32
+#undef InterlockedExchange32
+#undef InterlockedExchangeAdd32
+#undef InterlockedAnd32
+#undef InterlockedOr32
+#undef InterlockedXor32
+#undef InterlockedExchangeAdd16
+#undef InterlockedCompareExchange8
+#undef InterlockedExchangeAdd8
 
 #else
 
@@ -424,6 +429,79 @@ inline Object* DoExchange(Isolate* isolate, void* buffer, size_t index,
   return ToObject<T>(isolate, FromAtomic<T>(result));
 }
 
+
+// Uint8Clamped functions
+
+uint8_t ClampToUint8(int32_t value) {
+  if (value < 0) return 0;
+  if (value > 255) return 255;
+  return value;
+}
+
+
+inline Object* DoCompareExchangeUint8Clamped(Isolate* isolate, void* buffer,
+                                             size_t index,
+                                             Handle<Object> oldobj,
+                                             Handle<Object> newobj) {
+  typedef int32_t convert_type;
+  typedef uint8_t atomic_type;
+  atomic_type oldval = ClampToUint8(FromObject<convert_type>(oldobj));
+  atomic_type newval = ClampToUint8(FromObject<convert_type>(newobj));
+  atomic_type result = CompareExchangeSeqCst(
+      static_cast<atomic_type*>(buffer) + index, oldval, newval);
+  return ToObject<uint8_t>(isolate, FromAtomic<uint8_t>(result));
+}
+
+
+inline Object* DoStoreUint8Clamped(Isolate* isolate, void* buffer, size_t index,
+                                   Handle<Object> obj) {
+  typedef int32_t convert_type;
+  typedef uint8_t atomic_type;
+  atomic_type value = ClampToUint8(FromObject<convert_type>(obj));
+  StoreSeqCst(static_cast<atomic_type*>(buffer) + index, value);
+  return *obj;
+}
+
+
+#define DO_UINT8_CLAMPED_OP(name, op)                                        \
+  inline Object* Do##name##Uint8Clamped(Isolate* isolate, void* buffer,      \
+                                        size_t index, Handle<Object> obj) {  \
+    typedef int32_t convert_type;                                            \
+    typedef uint8_t atomic_type;                                             \
+    atomic_type* p = static_cast<atomic_type*>(buffer) + index;              \
+    convert_type operand = FromObject<convert_type>(obj);                    \
+    atomic_type expected;                                                    \
+    atomic_type result;                                                      \
+    do {                                                                     \
+      expected = *p;                                                         \
+      result = ClampToUint8(static_cast<convert_type>(expected) op operand); \
+    } while (CompareExchangeSeqCst(p, expected, result) != expected);        \
+    return ToObject<uint8_t>(isolate, expected);                             \
+  }
+
+DO_UINT8_CLAMPED_OP(Add, +)
+DO_UINT8_CLAMPED_OP(Sub, -)
+DO_UINT8_CLAMPED_OP(And, &)
+DO_UINT8_CLAMPED_OP(Or, | )
+DO_UINT8_CLAMPED_OP(Xor, ^)
+
+#undef DO_UINT8_CLAMPED_OP
+
+
+inline Object* DoExchangeUint8Clamped(Isolate* isolate, void* buffer,
+                                      size_t index, Handle<Object> obj) {
+  typedef int32_t convert_type;
+  typedef uint8_t atomic_type;
+  atomic_type* p = static_cast<atomic_type*>(buffer) + index;
+  atomic_type result = ClampToUint8(FromObject<convert_type>(obj));
+  atomic_type expected;
+  do {
+    expected = *p;
+  } while (CompareExchangeSeqCst(p, expected, result) != expected);
+  return ToObject<uint8_t>(isolate, expected);
+}
+
+
 }  // anonymous namespace
 
 // Duplicated from objects.h
@@ -434,8 +512,7 @@ inline Object* DoExchange(Isolate* isolate, void* buffer, size_t index,
   V(Uint16, uint16, UINT16, uint16_t, 2) \
   V(Int16, int16, INT16, int16_t, 2)     \
   V(Uint32, uint32, UINT32, uint32_t, 4) \
-  V(Int32, int32, INT32, int32_t, 4)     \
-  V(Uint8Clamped, uint8_clamped, UINT8_CLAMPED, uint8_t, 1)
+  V(Int32, int32, INT32, int32_t, 4)
 
 
 RUNTIME_FUNCTION(Runtime_AtomicsCompareExchange) {
@@ -445,8 +522,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsCompareExchange) {
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(oldobj, 2);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(newobj, 3);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -455,8 +532,18 @@ RUNTIME_FUNCTION(Runtime_AtomicsCompareExchange) {
   case kExternal##Type##Array:                              \
     return DoCompareExchange<ctype>(isolate, buffer, index, oldobj, newobj);
 
-    TYPED_ARRAYS(TYPED_ARRAY_CASE)
+    INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalFloat32Array:
+      return DoCompareExchange<float>(isolate, buffer, index, oldobj, newobj);
+
+    case kExternalFloat64Array:
+      return DoCompareExchange<double>(isolate, buffer, index, oldobj, newobj);
+
+    case kExternalUint8ClampedArray:
+      return DoCompareExchangeUint8Clamped(isolate, buffer, index, oldobj,
+                                           newobj);
 
     default:
       break;
@@ -472,8 +559,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsLoad) {
   DCHECK(args.length() == 2);
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -500,8 +587,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsStore) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -510,8 +597,17 @@ RUNTIME_FUNCTION(Runtime_AtomicsStore) {
   case kExternal##Type##Array:                              \
     return DoStore<ctype>(isolate, buffer, index, value);
 
-    TYPED_ARRAYS(TYPED_ARRAY_CASE)
+    INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalFloat32Array:
+      return DoStore<float>(isolate, buffer, index, value);
+
+    case kExternalFloat64Array:
+      return DoStore<double>(isolate, buffer, index, value);
+
+    case kExternalUint8ClampedArray:
+      return DoStoreUint8Clamped(isolate, buffer, index, value);
 
     default:
       break;
@@ -528,8 +624,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsAdd) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -540,6 +636,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsAdd) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoAddUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:
@@ -558,8 +657,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsSub) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -570,6 +669,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsSub) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoSubUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:
@@ -588,8 +690,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsAnd) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -600,6 +702,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsAnd) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoAndUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:
@@ -618,8 +723,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsOr) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -630,6 +735,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsOr) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoOrUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:
@@ -648,8 +756,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsXor) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -660,6 +768,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsXor) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoXorUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:
@@ -678,8 +789,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsExchange) {
   CONVERT_ARG_HANDLE_CHECKED(JSTypedArray, sta, 0);
   CONVERT_SIZE_ARG_CHECKED(index, 1);
   CONVERT_NUMBER_ARG_HANDLE_CHECKED(value, 2);
-  DCHECK(sta->GetBuffer()->is_shared());
-  DCHECK(index < NumberToSize(isolate, sta->length()));
+  RUNTIME_ASSERT(sta->GetBuffer()->is_shared());
+  RUNTIME_ASSERT(index < NumberToSize(isolate, sta->length()));
 
   void* buffer = sta->GetBuffer()->backing_store();
 
@@ -690,6 +801,9 @@ RUNTIME_FUNCTION(Runtime_AtomicsExchange) {
 
     INTEGER_TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
+
+    case kExternalUint8ClampedArray:
+      return DoExchangeUint8Clamped(isolate, buffer, index, value);
 
     case kExternalFloat32Array:
     case kExternalFloat64Array:

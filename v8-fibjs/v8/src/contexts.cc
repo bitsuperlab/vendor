@@ -5,7 +5,7 @@
 #include "src/v8.h"
 
 #include "src/bootstrapper.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/scopeinfo.h"
 
 namespace v8 {
@@ -20,8 +20,11 @@ Handle<ScriptContextTable> ScriptContextTable::Extend(
   CHECK(used >= 0 && length > 0 && used < length);
   if (used + 1 == length) {
     CHECK(length < Smi::kMaxValue / 2);
-    result = Handle<ScriptContextTable>::cast(
-        FixedArray::CopySize(table, length * 2));
+    Isolate* isolate = table->GetIsolate();
+    Handle<FixedArray> copy =
+        isolate->factory()->CopyFixedArrayAndGrow(table, length);
+    copy->set_map(isolate->heap()->script_context_table_map());
+    result = Handle<ScriptContextTable>::cast(copy);
   } else {
     result = table;
   }
@@ -40,10 +43,10 @@ bool ScriptContextTable::Lookup(Handle<ScriptContextTable> table,
     DCHECK(context->IsScriptContext());
     Handle<ScopeInfo> scope_info(ScopeInfo::cast(context->extension()));
     int slot_index = ScopeInfo::ContextSlotIndex(
-        scope_info, name, &result->mode, &result->init_flag,
+        scope_info, name, &result->mode, &result->location, &result->init_flag,
         &result->maybe_assigned_flag);
 
-    if (slot_index >= 0) {
+    if (slot_index >= 0 && result->location == VariableLocation::CONTEXT) {
       result->context_index = i;
       result->slot_index = slot_index;
       return true;
@@ -85,22 +88,13 @@ Context* Context::script_context() {
 
 
 Context* Context::native_context() {
-  // Fast case: the global object for this context has been set.  In
-  // that case, the global object has a direct pointer to the global
-  // context.
-  if (global_object()->IsGlobalObject()) {
-    return global_object()->native_context();
-  }
-
-  // During bootstrapping, the global object might not be set and we
-  // have to search the context chain to find the native context.
-  DCHECK(this->GetIsolate()->bootstrapper()->IsActive());
-  Context* current = this;
-  while (!current->IsNativeContext()) {
-    JSFunction* closure = JSFunction::cast(current->closure());
-    current = Context::cast(closure->context());
-  }
-  return current;
+  // Fast case: the receiver context is already a native context.
+  if (IsNativeContext()) return this;
+  // The global object has a direct pointer to the native context. If the
+  // following DCHECK fails, the native context is probably being accessed
+  // indirectly during bootstrapping. This is unsupported.
+  DCHECK(global_object()->IsGlobalObject());
+  return global_object()->native_context();
 }
 
 
@@ -149,7 +143,6 @@ static void GetAttributesAndBindingFlags(VariableMode mode,
                                          PropertyAttributes* attributes,
                                          BindingFlags* binding_flags) {
   switch (mode) {
-    case INTERNAL:  // Fall through.
     case VAR:
       *attributes = NONE;
       *binding_flags = MUTABLE_IS_INITIALIZED;
@@ -296,14 +289,15 @@ Handle<Object> Context::Lookup(Handle<String> name,
             ScopeInfo::cast(context->extension()), isolate);
       }
       VariableMode mode;
+      VariableLocation location;
       InitializationFlag init_flag;
       // TODO(sigurds) Figure out whether maybe_assigned_flag should
       // be used to compute binding_flags.
       MaybeAssignedFlag maybe_assigned_flag;
       int slot_index = ScopeInfo::ContextSlotIndex(
-          scope_info, name, &mode, &init_flag, &maybe_assigned_flag);
+          scope_info, name, &mode, &location, &init_flag, &maybe_assigned_flag);
       DCHECK(slot_index < 0 || slot_index >= MIN_CONTEXT_SLOTS);
-      if (slot_index >= 0) {
+      if (slot_index >= 0 && location == VariableLocation::CONTEXT) {
         if (FLAG_trace_contexts) {
           PrintF("=> found local in context slot %d (mode = %d)\n",
                  slot_index, mode);
@@ -358,6 +352,25 @@ Handle<Object> Context::Lookup(Handle<String> name,
     PrintF("=> no property/slot found\n");
   }
   return Handle<Object>::null();
+}
+
+
+void Context::InitializeGlobalSlots() {
+  DCHECK(IsScriptContext());
+  DisallowHeapAllocation no_gc;
+
+  ScopeInfo* scope_info = ScopeInfo::cast(extension());
+
+  int context_globals = scope_info->ContextGlobalCount();
+  if (context_globals > 0) {
+    PropertyCell* empty_cell = GetHeap()->empty_property_cell();
+
+    int context_locals = scope_info->ContextLocalCount();
+    int index = Context::MIN_CONTEXT_SLOTS + context_locals;
+    for (int i = 0; i < context_globals; i++) {
+      set(index++, empty_cell);
+    }
+  }
 }
 
 

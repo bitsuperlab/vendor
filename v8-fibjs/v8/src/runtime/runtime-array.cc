@@ -5,6 +5,7 @@
 #include "src/v8.h"
 
 #include "src/arguments.h"
+#include "src/elements.h"
 #include "src/messages.h"
 #include "src/runtime/runtime-utils.h"
 
@@ -102,6 +103,7 @@ RUNTIME_FUNCTION(Runtime_PushIfAbsent) {
   // Strict not needed. Used for cycle detection in Array join implementation.
   RETURN_FAILURE_ON_EXCEPTION(
       isolate, JSObject::AddDataElement(array, length, element, NONE));
+  JSObject::ValidateElements(array);
   return isolate->heap()->true_value();
 }
 
@@ -131,7 +133,7 @@ class ArrayConcatVisitor {
   ~ArrayConcatVisitor() { clear_storage(); }
 
   void visit(uint32_t i, Handle<Object> elm) {
-    if (i > JSObject::kMaxElementCount - index_offset_) {
+    if (i >= JSObject::kMaxElementCount - index_offset_) {
       set_exceeds_array_limit(true);
       return;
     }
@@ -293,9 +295,9 @@ static uint32_t EstimateElementCount(Handle<JSArray> array) {
       }
       break;
     }
-    case SLOPPY_ARGUMENTS_ELEMENTS:
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size) \
-  case EXTERNAL_##TYPE##_ELEMENTS:                      \
   case TYPE##_ELEMENTS:
 
       TYPED_ARRAYS(TYPED_ARRAY_CASE)
@@ -415,7 +417,6 @@ static void CollectElementIndices(Handle<JSObject> object, uint32_t range,
     }
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size) \
   case TYPE##_ELEMENTS:                                 \
-  case EXTERNAL_##TYPE##_ELEMENTS:
 
       TYPED_ARRAYS(TYPED_ARRAY_CASE)
 #undef TYPED_ARRAY_CASE
@@ -434,13 +435,10 @@ static void CollectElementIndices(Handle<JSObject> object, uint32_t range,
         if (length == range) return;  // All indices accounted for already.
         break;
       }
-    case SLOPPY_ARGUMENTS_ELEMENTS: {
-      MaybeHandle<Object> length_obj =
-          Object::GetProperty(object, isolate->factory()->length_string());
-      double length_num = length_obj.ToHandleChecked()->Number();
-      uint32_t length = static_cast<uint32_t>(DoubleToInt32(length_num));
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS: {
       ElementsAccessor* accessor = object->GetElementsAccessor();
-      for (uint32_t i = 0; i < length; i++) {
+      for (uint32_t i = 0; i < range; i++) {
         if (accessor->HasElement(object, i)) {
           indices->Add(i);
         }
@@ -468,9 +466,9 @@ static bool IterateElementsSlow(Isolate* isolate, Handle<JSObject> receiver,
     if (!maybe.IsJust()) return false;
     if (maybe.FromJust()) {
       Handle<Object> element_value;
-      ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-          isolate, element_value,
-          Runtime::GetElementOrCharAt(isolate, receiver, i), false);
+      ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate, element_value,
+                                       Object::GetElement(isolate, receiver, i),
+                                       false);
       visitor->visit(i, element_value);
     }
   }
@@ -606,15 +604,6 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       }
       break;
     }
-    case EXTERNAL_UINT8_CLAMPED_ELEMENTS: {
-      Handle<ExternalUint8ClampedArray> pixels(
-          ExternalUint8ClampedArray::cast(receiver->elements()));
-      for (uint32_t j = 0; j < length; j++) {
-        Handle<Smi> e(Smi::FromInt(pixels->get_scalar(j)), isolate);
-        visitor->visit(j, e);
-      }
-      break;
-    }
     case UINT8_CLAMPED_ELEMENTS: {
       Handle<FixedUint8ClampedArray> pixels(
       FixedUint8ClampedArray::cast(receiver->elements()));
@@ -624,19 +613,9 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       }
       break;
     }
-    case EXTERNAL_INT8_ELEMENTS: {
-      IterateTypedArrayElements<ExternalInt8Array, int8_t>(
-          isolate, receiver, true, true, visitor);
-      break;
-    }
     case INT8_ELEMENTS: {
       IterateTypedArrayElements<FixedInt8Array, int8_t>(
       isolate, receiver, true, true, visitor);
-      break;
-    }
-    case EXTERNAL_UINT8_ELEMENTS: {
-      IterateTypedArrayElements<ExternalUint8Array, uint8_t>(
-          isolate, receiver, true, true, visitor);
       break;
     }
     case UINT8_ELEMENTS: {
@@ -644,19 +623,9 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       isolate, receiver, true, true, visitor);
       break;
     }
-    case EXTERNAL_INT16_ELEMENTS: {
-      IterateTypedArrayElements<ExternalInt16Array, int16_t>(
-          isolate, receiver, true, true, visitor);
-      break;
-    }
     case INT16_ELEMENTS: {
       IterateTypedArrayElements<FixedInt16Array, int16_t>(
       isolate, receiver, true, true, visitor);
-      break;
-    }
-    case EXTERNAL_UINT16_ELEMENTS: {
-      IterateTypedArrayElements<ExternalUint16Array, uint16_t>(
-          isolate, receiver, true, true, visitor);
       break;
     }
     case UINT16_ELEMENTS: {
@@ -664,19 +633,9 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       isolate, receiver, true, true, visitor);
       break;
     }
-    case EXTERNAL_INT32_ELEMENTS: {
-      IterateTypedArrayElements<ExternalInt32Array, int32_t>(
-          isolate, receiver, true, false, visitor);
-      break;
-    }
     case INT32_ELEMENTS: {
       IterateTypedArrayElements<FixedInt32Array, int32_t>(
       isolate, receiver, true, false, visitor);
-      break;
-    }
-    case EXTERNAL_UINT32_ELEMENTS: {
-      IterateTypedArrayElements<ExternalUint32Array, uint32_t>(
-          isolate, receiver, true, false, visitor);
       break;
     }
     case UINT32_ELEMENTS: {
@@ -684,19 +643,9 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       isolate, receiver, true, false, visitor);
       break;
     }
-    case EXTERNAL_FLOAT32_ELEMENTS: {
-      IterateTypedArrayElements<ExternalFloat32Array, float>(
-          isolate, receiver, false, false, visitor);
-      break;
-    }
     case FLOAT32_ELEMENTS: {
       IterateTypedArrayElements<FixedFloat32Array, float>(
       isolate, receiver, false, false, visitor);
-      break;
-    }
-    case EXTERNAL_FLOAT64_ELEMENTS: {
-      IterateTypedArrayElements<ExternalFloat64Array, double>(
-          isolate, receiver, false, false, visitor);
       break;
     }
     case FLOAT64_ELEMENTS: {
@@ -704,7 +653,8 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
       isolate, receiver, false, false, visitor);
       break;
     }
-    case SLOPPY_ARGUMENTS_ELEMENTS: {
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS: {
       for (uint32_t index = 0; index < length; index++) {
         HandleScope loop_scope(isolate);
         Handle<Object> element;
@@ -724,17 +674,18 @@ static bool IterateElements(Isolate* isolate, Handle<JSObject> receiver,
 static bool IsConcatSpreadable(Isolate* isolate, Handle<Object> obj) {
   HandleScope handle_scope(isolate);
   if (!obj->IsSpecObject()) return false;
-  if (obj->IsJSArray()) return true;
-  if (FLAG_harmony_arrays) {
+  if (FLAG_harmony_concat_spreadable) {
     Handle<Symbol> key(isolate->factory()->is_concat_spreadable_symbol());
     Handle<Object> value;
     MaybeHandle<Object> maybeValue =
         i::Runtime::GetObjectProperty(isolate, obj, key);
     if (maybeValue.ToHandle(&value)) {
-      return value->BooleanValue();
+      if (!value->IsUndefined()) {
+        return value->BooleanValue();
+      }
     }
   }
-  return false;
+  return obj->IsJSArray();
 }
 
 
@@ -1067,8 +1018,8 @@ static Object* ArrayConstructorCommon(Isolate* isolate,
     Handle<Object> argument_one = caller_args->at<Object>(0);
     if (argument_one->IsSmi()) {
       int value = Handle<Smi>::cast(argument_one)->value();
-      if (value < 0 || JSArray::SetElementsLengthWouldNormalize(isolate->heap(),
-                                                                argument_one)) {
+      if (value < 0 ||
+          JSArray::SetLengthWouldNormalize(isolate->heap(), value)) {
         // the array is a dictionary in this case.
         can_use_type_feedback = false;
       } else if (value != 0) {
@@ -1107,8 +1058,8 @@ static Object* ArrayConstructorCommon(Isolate* isolate,
       allocation_site = site;
     }
 
-    array = Handle<JSArray>::cast(factory->NewJSObjectFromMap(
-        initial_map, NOT_TENURED, true, allocation_site));
+    array = Handle<JSArray>::cast(
+        factory->NewJSObjectFromMap(initial_map, NOT_TENURED, allocation_site));
   } else {
     array = Handle<JSArray>::cast(factory->NewJSObject(constructor));
 
@@ -1227,8 +1178,7 @@ RUNTIME_FUNCTION(Runtime_NormalizeElements) {
   HandleScope scope(isolate);
   DCHECK(args.length() == 1);
   CONVERT_ARG_HANDLE_CHECKED(JSObject, array, 0);
-  RUNTIME_ASSERT(!array->HasExternalArrayElements() &&
-                 !array->HasFixedTypedArrayElements() &&
+  RUNTIME_ASSERT(!array->HasFixedTypedArrayElements() &&
                  !array->IsJSGlobalProxy());
   JSObject::NormalizeElements(array);
   return *array;
@@ -1257,16 +1207,7 @@ RUNTIME_FUNCTION(Runtime_GrowArrayElements) {
     }
 
     uint32_t new_capacity = JSObject::NewElementsCapacity(index + 1);
-    ElementsKind kind = object->GetElementsKind();
-    if (IsFastDoubleElementsKind(kind)) {
-      JSObject::SetFastDoubleElementsCapacity(object, new_capacity);
-    } else {
-      JSObject::SetFastElementsCapacitySmiMode set_capacity_mode =
-          object->HasFastSmiElements() ? JSObject::kAllowSmiElements
-                                       : JSObject::kDontAllowSmiElements;
-      JSObject::SetFastElementsCapacity(object, new_capacity,
-                                        set_capacity_mode);
-    }
+    object->GetElementsAccessor()->GrowCapacityAndConvert(object, new_capacity);
   }
 
   // On success, return the fixed array elements.

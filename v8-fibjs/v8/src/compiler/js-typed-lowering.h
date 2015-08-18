@@ -41,6 +41,7 @@ class JSTypedLowering final : public AdvancedReducer {
   Reduction ReduceJSBitwiseOr(Node* node);
   Reduction ReduceJSMultiply(Node* node);
   Reduction ReduceJSComparison(Node* node);
+  Reduction ReduceJSLoadGlobal(Node* node);
   Reduction ReduceJSLoadNamed(Node* node);
   Reduction ReduceJSLoadProperty(Node* node);
   Reduction ReduceJSStoreProperty(Node* node);
@@ -87,9 +88,6 @@ class JSTypedLowering final : public AdvancedReducer {
 
   JSGraph* jsgraph_;
   SimplifiedOperatorBuilder simplified_;
-  Type* zero_range_;
-  Type* one_range_;
-  Type* zero_thirtyone_range_;
   Type* shifted_int32_ranges_[4];
 };
 

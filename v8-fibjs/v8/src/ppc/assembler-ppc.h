@@ -292,6 +292,15 @@ const Register fp = {kRegister_fp_Code};
 const Register cp = {kRegister_r30_Code};  // JavaScript context pointer
 const Register kRootRegister = {kRegister_r29_Code};  // Roots array pointer.
 const Register kConstantPoolRegister = {kRegister_r28_Code};  // Constant pool
+const Register kInterpreterBytecodeOffsetRegister = {
+    kRegister_r14_Code  // Interpreter bytecode offset.
+};
+const Register kInterpreterBytecodeArrayRegister = {
+    kRegister_r15_Code  // Interpreter bytecode array pointer.
+};
+const Register kInterpreterDispatchTableRegister = {
+    kRegister_r16_Code  // Interpreter dispatch table.
+};
 
 // Double word FP register.
 struct DoubleRegister {
@@ -591,10 +600,11 @@ class Assembler : public AssemblerBase {
 
   // Returns the branch offset to the given label from the current code position
   // Links the label to the current position if it is still unbound
-  // Manages the jump elimination optimization if the second parameter is true.
-  int branch_offset(Label* L, bool jump_elimination_allowed) {
-    int position = link(L);
-    return position - pc_offset();
+  int branch_offset(Label* L) {
+    if (L->is_unused() && !trampoline_emitted_) {
+      TrackBranch();
+    }
+    return link(L) - pc_offset();
   }
 
   // Puts a labels target address at the given position.
@@ -641,9 +651,6 @@ class Assembler : public AssemblerBase {
   // Given the address of the beginning of a call, return the address
   // in the instruction stream that the call will return to.
   INLINE(static Address return_address_from_call_start(Address pc));
-
-  // Return the code target address of the patch debug break slot
-  INLINE(static Address break_address_from_return_address(Address pc));
 
   // This sets the branch destination.
   // This is for calls and branches within generated code.
@@ -695,14 +702,6 @@ class Assembler : public AssemblerBase {
   static const int kCallTargetAddressOffset =
       (kMovInstructions + 2) * kInstrSize;
 
-  // Distance between start of patched return sequence and the emitted address
-  // to jump to.
-  // Patched return sequence is a FIXED_SEQUENCE:
-  //   mov r0, <address>
-  //   mtlr r0
-  //   blrl
-  static const int kPatchReturnSequenceAddressOffset = 0 * kInstrSize;
-
   // Distance between start of patched debug break slot and the emitted address
   // to jump to.
   // Patched debug break slot code is a FIXED_SEQUENCE:
@@ -710,13 +709,6 @@ class Assembler : public AssemblerBase {
   //   mtlr r0
   //   blrl
   static const int kPatchDebugBreakSlotAddressOffset = 0 * kInstrSize;
-
-  // This is the length of the BreakLocation::SetDebugBreakAtReturn()
-  // code patch FIXED_SEQUENCE
-  static const int kJSReturnSequenceInstructions =
-      kMovInstructionsNoConstantPool + 3;
-  static const int kJSReturnSequenceLength =
-      kJSReturnSequenceInstructions * kInstrSize;
 
   // This is the length of the code sequence from SetDebugBreakAtSlot()
   // FIXED_SEQUENCE
@@ -743,24 +735,62 @@ class Assembler : public AssemblerBase {
   void CodeTargetAlign();
 
   // Branch instructions
-  void bclr(BOfield bo, LKBit lk);
+  void bclr(BOfield bo, int condition_bit, LKBit lk);
   void blr();
   void bc(int branch_offset, BOfield bo, int condition_bit, LKBit lk = LeaveLK);
   void b(int branch_offset, LKBit lk);
 
-  void bcctr(BOfield bo, LKBit lk);
+  void bcctr(BOfield bo, int condition_bit, LKBit lk);
   void bctr();
   void bctrl();
 
   // Convenience branch instructions using labels
-  void b(Label* L, LKBit lk = LeaveLK) { b(branch_offset(L, false), lk); }
+  void b(Label* L, LKBit lk = LeaveLK) { b(branch_offset(L), lk); }
+
+  inline CRegister cmpi_optimization(CRegister cr) {
+    // Check whether the branch is preceeded by an optimizable cmpi against 0.
+    // The cmpi can be deleted if it is also preceeded by an instruction that
+    // sets the register used by the compare and supports a dot form.
+    unsigned int sradi_mask = kOpcodeMask | kExt2OpcodeVariant2Mask;
+    unsigned int srawi_mask = kOpcodeMask | kExt2OpcodeMask;
+    int pos = pc_offset();
+    int cmpi_pos = pc_offset() - kInstrSize;
+
+    if (cmpi_pos > 0 && optimizable_cmpi_pos_ == cmpi_pos &&
+        cmpi_cr_.code() == cr.code() && last_bound_pos_ != pos) {
+      int xpos = cmpi_pos - kInstrSize;
+      int xinstr = instr_at(xpos);
+      int cmpi_ra = (instr_at(cmpi_pos) & 0x1f0000) >> 16;
+      // ra is at the same bit position for the three cases below.
+      int ra = (xinstr & 0x1f0000) >> 16;
+      if (cmpi_ra == ra) {
+        if ((xinstr & sradi_mask) == (EXT2 | SRADIX)) {
+          cr = cr0;
+          instr_at_put(xpos, xinstr | SetRC);
+          pc_ -= kInstrSize;
+        } else if ((xinstr & srawi_mask) == (EXT2 | SRAWIX)) {
+          cr = cr0;
+          instr_at_put(xpos, xinstr | SetRC);
+          pc_ -= kInstrSize;
+        } else if ((xinstr & kOpcodeMask) == ANDIx) {
+          cr = cr0;
+          pc_ -= kInstrSize;
+          // nothing to do here since andi. records.
+        }
+        // didn't match one of the above, must keep cmpwi.
+      }
+    }
+    return cr;
+  }
 
   void bc_short(Condition cond, Label* L, CRegister cr = cr7,
                 LKBit lk = LeaveLK) {
     DCHECK(cond != al);
     DCHECK(cr.code() >= 0 && cr.code() <= 7);
 
-    int b_offset = branch_offset(L, false);
+    cr = cmpi_optimization(cr);
+
+    int b_offset = branch_offset(L);
 
     switch (cond) {
       case eq:
@@ -798,11 +828,55 @@ class Assembler : public AssemblerBase {
     }
   }
 
+  void bclr(Condition cond, CRegister cr = cr7, LKBit lk = LeaveLK) {
+    DCHECK(cond != al);
+    DCHECK(cr.code() >= 0 && cr.code() <= 7);
+
+    cr = cmpi_optimization(cr);
+
+    switch (cond) {
+      case eq:
+        bclr(BT, encode_crbit(cr, CR_EQ), lk);
+        break;
+      case ne:
+        bclr(BF, encode_crbit(cr, CR_EQ), lk);
+        break;
+      case gt:
+        bclr(BT, encode_crbit(cr, CR_GT), lk);
+        break;
+      case le:
+        bclr(BF, encode_crbit(cr, CR_GT), lk);
+        break;
+      case lt:
+        bclr(BT, encode_crbit(cr, CR_LT), lk);
+        break;
+      case ge:
+        bclr(BF, encode_crbit(cr, CR_LT), lk);
+        break;
+      case unordered:
+        bclr(BT, encode_crbit(cr, CR_FU), lk);
+        break;
+      case ordered:
+        bclr(BF, encode_crbit(cr, CR_FU), lk);
+        break;
+      case overflow:
+        bclr(BT, encode_crbit(cr, CR_SO), lk);
+        break;
+      case nooverflow:
+        bclr(BF, encode_crbit(cr, CR_SO), lk);
+        break;
+      default:
+        UNIMPLEMENTED();
+    }
+  }
+
   void isel(Register rt, Register ra, Register rb, int cb);
   void isel(Condition cond, Register rt, Register ra, Register rb,
             CRegister cr = cr7) {
     DCHECK(cond != al);
     DCHECK(cr.code() >= 0 && cr.code() <= 7);
+
+    cr = cmpi_optimization(cr);
 
     switch (cond) {
       case eq:
@@ -891,7 +965,7 @@ class Assembler : public AssemblerBase {
 
   // Decrement CTR; branch if CTR != 0
   void bdnz(Label* L, LKBit lk = LeaveLK) {
-    bc(branch_offset(L, false), DCBNZ, 0, lk);
+    bc(branch_offset(L), DCBNZ, 0, lk);
   }
 
   // Data-processing instructions
@@ -1256,11 +1330,11 @@ class Assembler : public AssemblerBase {
 
   // Debugging
 
-  // Mark address of the ExitJSFrame code.
-  void RecordJSReturn();
+  // Mark generator continuation.
+  void RecordGeneratorContinuation();
 
   // Mark address of a debug break slot.
-  void RecordDebugBreakSlot();
+  void RecordDebugBreakSlot(RelocInfo::Mode mode, int argc = 0);
 
   // Record the AST id of the CallIC being compiled, so that it can be placed
   // in the relocation information.
@@ -1324,6 +1398,7 @@ class Assembler : public AssemblerBase {
   static bool IsCmpRegister(Instr instr);
   static bool IsCmpImmediate(Instr instr);
   static bool IsRlwinm(Instr instr);
+  static bool IsAndi(Instr instr);
 #if V8_TARGET_ARCH_PPC64
   static bool IsRldicl(Instr instr);
 #endif
@@ -1378,11 +1453,12 @@ class Assembler : public AssemblerBase {
 
   int buffer_space() const { return reloc_info_writer.pos() - pc_; }
 
-  // Decode branch instruction at pos and return branch target pos
+  // Decode instruction(s) at pos and return backchain to previous
+  // label reference or kEndOfChain.
   int target_at(int pos);
 
-  // Patch branch instruction at pos to branch to given branch target pos
-  void target_at_put(int pos, int target_pos);
+  // Patch instruction(s) at pos to target target_pos (e.g. branch)
+  void target_at_put(int pos, int target_pos, bool* is_branch = nullptr);
 
   // Record reloc info for current pc_
   void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
@@ -1434,7 +1510,7 @@ class Assembler : public AssemblerBase {
   // Repeated checking whether the trampoline pool should be emitted is rather
   // expensive. By default we only check again once a number of instructions
   // has been generated.
-  int next_buffer_check_;  // pc offset of next buffer check.
+  int next_trampoline_check_;  // pc offset of next buffer check.
 
   // Emission of the trampoline pool may be blocked in some code sequences.
   int trampoline_pool_blocked_nesting_;  // Block emission if this is not zero.
@@ -1451,6 +1527,9 @@ class Assembler : public AssemblerBase {
 
   // The bound position, before this we cannot do instruction elimination.
   int last_bound_pos_;
+  // Optimizable cmpi information.
+  int optimizable_cmpi_pos_;
+  CRegister cmpi_cr_;
 
   ConstantPoolBuilder constant_pool_builder_;
 
@@ -1458,6 +1537,8 @@ class Assembler : public AssemblerBase {
   inline void CheckBuffer();
   void GrowBuffer(int needed = 0);
   inline void emit(Instr x);
+  inline void TrackBranch();
+  inline void UntrackBranch();
   inline void CheckTrampolinePoolQuick();
 
   // Instruction generation
@@ -1511,7 +1592,7 @@ class Assembler : public AssemblerBase {
   };
 
   int32_t get_trampoline_entry();
-  int unbound_labels_count_;
+  int tracked_branch_count_;
   // If trampoline is emitted, generated code is becoming large. As
   // this is already a slow case which can possibly break our code
   // generation for the extreme case, we use this information to

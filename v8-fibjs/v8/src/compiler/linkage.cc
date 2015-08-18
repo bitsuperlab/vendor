@@ -4,6 +4,7 @@
 
 #include "src/code-stubs.h"
 #include "src/compiler.h"
+#include "src/compiler/common-operator.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/node.h"
 #include "src/compiler/pipeline.h"
@@ -25,6 +26,9 @@ std::ostream& operator<<(std::ostream& os, const CallDescriptor::Kind& k) {
     case CallDescriptor::kCallAddress:
       os << "Addr";
       break;
+    case CallDescriptor::kInterpreterDispatch:
+      os << "InterpreterDispatch";
+      break;
   }
   return os;
 }
@@ -45,6 +49,82 @@ bool CallDescriptor::HasSameReturnLocationsAs(
     if (GetReturnLocation(i) != other->GetReturnLocation(i)) return false;
   }
   return true;
+}
+
+
+bool CallDescriptor::CanTailCall(const Node* node) const {
+  // Determine the number of stack parameters passed in
+  size_t stack_params = 0;
+  for (size_t i = 0; i < InputCount(); ++i) {
+    if (!GetInputLocation(i).IsRegister()) {
+      ++stack_params;
+    }
+  }
+  // Ensure the input linkage contains the stack parameters in the right order
+  size_t current_stack_param = 0;
+  for (size_t i = 0; i < InputCount(); ++i) {
+    if (!GetInputLocation(i).IsRegister()) {
+      if (GetInputLocation(i) != LinkageLocation::ForCallerFrameSlot(
+                                     static_cast<int>(current_stack_param) -
+                                     static_cast<int>(stack_params))) {
+        return false;
+      }
+      ++current_stack_param;
+    }
+  }
+  // Tail calling is currently allowed if return locations match and all
+  // parameters are either in registers or on the stack but match exactly in
+  // number and content.
+  CallDescriptor const* other = OpParameter<CallDescriptor const*>(node);
+  if (!HasSameReturnLocationsAs(other)) return false;
+  size_t current_input = 0;
+  size_t other_input = 0;
+  while (true) {
+    if (other_input >= other->InputCount()) {
+      while (current_input < InputCount()) {
+        if (!GetInputLocation(current_input).IsRegister()) {
+          return false;
+        }
+        ++current_input;
+      }
+      return true;
+    }
+    if (current_input >= InputCount()) {
+      while (other_input < other->InputCount()) {
+        if (!other->GetInputLocation(other_input).IsRegister()) {
+          return false;
+        }
+        ++other_input;
+      }
+      return true;
+    }
+    if (GetInputLocation(current_input).IsRegister()) {
+      ++current_input;
+      continue;
+    }
+    if (other->GetInputLocation(other_input).IsRegister()) {
+      ++other_input;
+      continue;
+    }
+    if (GetInputLocation(current_input) !=
+        other->GetInputLocation(other_input)) {
+      return false;
+    }
+    Node* input = node->InputAt(static_cast<int>(other_input));
+    if (input->opcode() != IrOpcode::kParameter) {
+      return false;
+    }
+    // Make sure that the parameter input passed through to the tail call
+    // corresponds to the correct stack slot.
+    size_t param_index = ParameterIndexOf(input->op());
+    if (param_index != current_input - 1) {
+      return false;
+    }
+    ++current_input;
+    ++other_input;
+  }
+  UNREACHABLE();
+  return false;
 }
 
 
@@ -105,18 +185,20 @@ FrameOffset Linkage::GetFrameOffset(int spill_slot, Frame* frame,
 
 
 // static
-bool Linkage::NeedsFrameState(Runtime::FunctionId function) {
+int Linkage::FrameStateInputCount(Runtime::FunctionId function) {
   // Most runtime functions need a FrameState. A few chosen ones that we know
   // not to call into arbitrary JavaScript, not to throw, and not to deoptimize
   // are blacklisted here and can be called without a FrameState.
   switch (function) {
     case Runtime::kAllocateInTargetSpace:
     case Runtime::kDateField:
+    case Runtime::kFinalizeClassDefinition:        // TODO(conradw): Is it safe?
     case Runtime::kDefineClassMethod:              // TODO(jarin): Is it safe?
     case Runtime::kDefineGetterPropertyUnchecked:  // TODO(jarin): Is it safe?
     case Runtime::kDefineSetterPropertyUnchecked:  // TODO(jarin): Is it safe?
     case Runtime::kForInDone:
     case Runtime::kForInStep:
+    case Runtime::kGetOriginalConstructor:
     case Runtime::kNewArguments:
     case Runtime::kNewClosure:
     case Runtime::kNewFunctionContext:
@@ -124,20 +206,23 @@ bool Linkage::NeedsFrameState(Runtime::FunctionId function) {
     case Runtime::kPushBlockContext:
     case Runtime::kPushCatchContext:
     case Runtime::kReThrow:
-    case Runtime::kStringCompareRT:
+    case Runtime::kStringCompare:
     case Runtime::kStringEquals:
     case Runtime::kToFastProperties:  // TODO(jarin): Is it safe?
     case Runtime::kTraceEnter:
     case Runtime::kTraceExit:
-      return false;
+      return 0;
     case Runtime::kInlineArguments:
     case Runtime::kInlineCallFunction:
-    case Runtime::kInlineDeoptimizeNow:
+    case Runtime::kInlineDefaultConstructorCallSuper:
     case Runtime::kInlineGetCallerJSFunction:
     case Runtime::kInlineGetPrototype:
     case Runtime::kInlineRegExpExec:
-    case Runtime::kInlineThrowIfNotADate:
-      return true;
+    case Runtime::kInlineToObject:
+      return 1;
+    case Runtime::kInlineDeoptimizeNow:
+    case Runtime::kInlineThrowNotDateError:
+      return 2;
     default:
       break;
   }
@@ -145,18 +230,18 @@ bool Linkage::NeedsFrameState(Runtime::FunctionId function) {
   // Most inlined runtime functions (except the ones listed above) can be called
   // without a FrameState or will be lowered by JSIntrinsicLowering internally.
   const Runtime::Function* const f = Runtime::FunctionForId(function);
-  if (f->intrinsic_type == Runtime::IntrinsicType::INLINE) return false;
+  if (f->intrinsic_type == Runtime::IntrinsicType::INLINE) return 0;
 
-  return true;
+  return 1;
 }
 
 
 bool CallDescriptor::UsesOnlyRegisters() const {
   for (size_t i = 0; i < InputCount(); ++i) {
-    if (!GetInputLocation(i).is_register()) return false;
+    if (!GetInputLocation(i).IsRegister()) return false;
   }
   for (size_t i = 0; i < ReturnCount(); ++i) {
-    if (!GetReturnLocation(i).is_register()) return false;
+    if (!GetReturnLocation(i).IsRegister()) return false;
   }
   return true;
 }
@@ -197,11 +282,6 @@ CallDescriptor* Linkage::GetStubCallDescriptor(
 }
 
 
-CallDescriptor* Linkage::GetSimplifiedCDescriptor(Zone* zone,
-                                                  const MachineSignature* sig) {
-  UNIMPLEMENTED();
-  return NULL;
-}
 #endif  // !V8_TURBOFAN_BACKEND
 }  // namespace compiler
 }  // namespace internal

@@ -20,7 +20,7 @@ class DeoptimizedFrameInfo;
 class TranslatedState;
 class RegisterValues;
 
-class TranslatedValue BASE_EMBEDDED {
+class TranslatedValue {
  public:
   // Allocation-less getter of the value.
   // Returns heap()->arguments_marker() if allocation would be
@@ -294,50 +294,6 @@ class TranslatedState {
   std::deque<ObjectPosition> object_positions_;
 };
 
-template<typename T>
-class HeapNumberMaterializationDescriptor BASE_EMBEDDED {
- public:
-  HeapNumberMaterializationDescriptor(T destination, double value)
-      : destination_(destination), value_(value) { }
-
-  T destination() const { return destination_; }
-  double value() const { return value_; }
-
- private:
-  T destination_;
-  double value_;
-};
-
-
-class ObjectMaterializationDescriptor BASE_EMBEDDED {
- public:
-  ObjectMaterializationDescriptor(
-      Address slot_address, int frame, int length, int duplicate, bool is_args)
-      : slot_address_(slot_address),
-        jsframe_index_(frame),
-        object_length_(length),
-        duplicate_object_(duplicate),
-        is_arguments_(is_args) { }
-
-  Address slot_address() const { return slot_address_; }
-  int jsframe_index() const { return jsframe_index_; }
-  int object_length() const { return object_length_; }
-  int duplicate_object() const { return duplicate_object_; }
-  bool is_arguments() const { return is_arguments_; }
-
-  // Only used for allocated receivers in DoComputeConstructStubFrame.
-  void patch_slot_address(intptr_t slot) {
-    slot_address_ = reinterpret_cast<Address>(slot);
-  }
-
- private:
-  Address slot_address_;
-  int jsframe_index_;
-  int object_length_;
-  int duplicate_object_;
-  bool is_arguments_;
-};
-
 
 class OptimizedFunctionVisitor BASE_EMBEDDED {
  public:
@@ -394,6 +350,7 @@ class OptimizedFunctionVisitor BASE_EMBEDDED {
   V(kNoCache, "no cache")                                                      \
   V(kNonStrictElementsInKeyedLoadGenericStub,                                  \
     "non-strict elements in KeyedLoadGenericStub")                             \
+  V(kNotADateObject, "not a date object")                                      \
   V(kNotAHeapNumber, "not a heap number")                                      \
   V(kNotAHeapNumberUndefinedBoolean, "not a heap number/undefined/true/false") \
   V(kNotAHeapNumberUndefined, "not a heap number/undefined")                   \
@@ -428,7 +385,8 @@ class OptimizedFunctionVisitor BASE_EMBEDDED {
   V(kValueMismatch, "value mismatch")                                          \
   V(kWrongInstanceType, "wrong instance type")                                 \
   V(kWrongMap, "wrong map")                                                    \
-  V(kUndefinedOrNullInForIn, "null or undefined in for-in")
+  V(kUndefinedOrNullInForIn, "null or undefined in for-in")                    \
+  V(kUndefinedOrNullInToObject, "null or undefined in ToObject")
 
 
 class Deoptimizer : public Malloced {
@@ -526,9 +484,6 @@ class Deoptimizer : public Malloced {
 
   // Deoptimize all code in the given isolate.
   static void DeoptimizeAll(Isolate* isolate);
-
-  // Deoptimize code associated with the given global object.
-  static void DeoptimizeGlobalObject(JSObject* object);
 
   // Deoptimizes all optimized code that has been previously marked
   // (via code->set_marked_for_deoptimization) and unlinks all functions that
@@ -661,7 +616,7 @@ class Deoptimizer : public Malloced {
   unsigned ComputeFixedSize(JSFunction* function) const;
 
   unsigned ComputeIncomingArgumentSize(JSFunction* function) const;
-  unsigned ComputeOutgoingArgumentSize() const;
+  static unsigned ComputeOutgoingArgumentSize(Code* code, unsigned bailout_id);
 
   Object* ComputeLiteral(int index) const;
 
@@ -896,23 +851,19 @@ class FrameDescription {
   }
 
   static int frame_size_offset() {
-    return OFFSET_OF(FrameDescription, frame_size_);
+    return offsetof(FrameDescription, frame_size_);
   }
 
-  static int pc_offset() {
-    return OFFSET_OF(FrameDescription, pc_);
-  }
+  static int pc_offset() { return offsetof(FrameDescription, pc_); }
 
-  static int state_offset() {
-    return OFFSET_OF(FrameDescription, state_);
-  }
+  static int state_offset() { return offsetof(FrameDescription, state_); }
 
   static int continuation_offset() {
-    return OFFSET_OF(FrameDescription, continuation_);
+    return offsetof(FrameDescription, continuation_);
   }
 
   static int frame_content_offset() {
-    return OFFSET_OF(FrameDescription, frame_content_);
+    return offsetof(FrameDescription, frame_content_);
   }
 
  private:

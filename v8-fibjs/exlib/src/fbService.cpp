@@ -8,6 +8,8 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <assert.h>
 
 #include "osconfig.h"
 #include "service.h"
@@ -18,92 +20,84 @@ namespace exlib
 
 #define FB_STK_ALIGN 256
 
-#ifdef _WIN32
-extern "C" int win_switch(context *from, context *to);
-#define fb_switch win_switch
-#else
-extern "C" int nix_switch(context *from, context *to);
-#define fb_switch nix_switch
-#endif
+void init_timer();
 
-Service *Service::root;
+static bool s_service_inited;
 
-#ifdef _WIN32
-
-static DWORD s_main;
-
-Service *Service::getFiberService()
+Thread_base* Thread_base::current()
 {
-    if (!s_main)
-    {
-        root = new Service();
-        s_main = GetCurrentThreadId();
-    }
-    else if (s_main != GetCurrentThreadId())
-        return NULL;
+    if (!s_service_inited)
+        return 0;
 
-    return root;
+    OSThread* thread_ = OSThread::current();
+
+    assert(thread_ != 0);
+
+    if (thread_->is(Service::type))
+        return ((Service*)thread_)->m_running;
+    return thread_;
+}
+
+Service *Service::current()
+{
+    OSThread* thread_ = OSThread::current();
+
+    assert(s_service_inited);
+    assert(thread_ != 0);
+    assert(thread_->is(Service::type));
+
+    return (Service*)thread_;
 }
 
 bool Service::hasService()
 {
-    return s_main == GetCurrentThreadId();
+    if (!s_service_inited)
+        return false;
+
+    assert(OSThread::current() != 0);
+    return OSThread::current()->is(Service::type);
 }
 
-#else
-
-static pthread_t s_main;
-
-Service *Service::getFiberService()
+void Service::init()
 {
-    if (!s_main)
-    {
-        root = new Service();
-        s_main = pthread_self();
-    }
-    else if (s_main != pthread_self())
-        return NULL;
+    Service *service_ = new Service();
+    service_->bindCurrent();
 
-    return root;
+    s_service_inited = true;
+
+    init_timer();
 }
 
-bool Service::hasService()
-{
-    return s_main == pthread_self();
-}
-
-#endif
-
-static class _service_init
-{
-public:
-    _service_init()
-    {
-        exlib::Service::getFiberService();
-    }
-} s_service_init;
-
-Service::Service()
+Service::Service() : m_main(this)
 {
     m_recycle = NULL;
     m_running = &m_main;
     m_Idle = NULL;
-    memset(&m_main, 0, sizeof(m_main));
-    memset(&m_tls, 0, sizeof(m_tls));
+    m_InterCallback = NULL;
+
+    m_main.set_name("main");
+    m_main.Ref();
+    m_main.saveStackGuard();
+
+    m_fibers.putTail(&m_main.m_link);
 }
 
 static void fiber_proc(void *(*func)(void *), void *data)
 {
+    Service* now = Service::current();
+    now->m_running->saveStackGuard();
+
     func(data);
 
-    Service::root->m_recycle = Service::root->m_running;
-    Service::root->switchtonext();
+    now->m_recycle = now->m_running;
+    now->switchConext();
 }
 
-Fiber *Fiber::Create(void *(*func)(void *), void *data, int stacksize)
+Fiber *Fiber::Create(void *(*func)(void *), void *data, int32_t stacksize)
 {
     Fiber *fb;
     void **stack;
+    Service* now = Service::current();
 
     stacksize = (stacksize + FB_STK_ALIGN - 1) & ~(FB_STK_ALIGN - 1);
 #ifdef WIN32
@@ -115,58 +109,65 @@ Fiber *Fiber::Create(void *(*func)(void *), void *data, int stacksize)
         return NULL;
     stack = (void **) fb + stacksize / sizeof(void *) - 5;
 
-    memset(fb, 0, sizeof(Fiber));
+    new(fb) Fiber(now);
+
+    fb->m_cntxt.ip = (intptr_t) fiber_proc;
+    fb->m_cntxt.sp = (intptr_t) stack;
 
 #if defined(x64)
-    fb->m_cntxt.Rip = (unsigned long long) fiber_proc;
-    fb->m_cntxt.Rsp = (unsigned long long) stack;
-
 #ifdef _WIN32
-    fb->m_cntxt.Rcx = (unsigned long long) func;
-    fb->m_cntxt.Rdx = (unsigned long long) data;
+    fb->m_cntxt.Rcx = (intptr_t) func;
+    fb->m_cntxt.Rdx = (intptr_t) data;
 #else
-    fb->m_cntxt.Rdi = (unsigned long long) func;
-    fb->m_cntxt.Rsi = (unsigned long long) data;
+    fb->m_cntxt.Rdi = (intptr_t) func;
+    fb->m_cntxt.Rsi = (intptr_t) data;
 #endif
-
 #elif defined(I386)
-    fb->m_cntxt.Eip = (unsigned long) fiber_proc;
-    fb->m_cntxt.Esp = (unsigned long) stack;
-
     stack[1] = (void *)func;
     stack[2] = data;
-
 #elif defined(arm)
-    fb->m_cntxt.r14 = (unsigned long) fiber_proc;
-    fb->m_cntxt.r13 = (unsigned long) stack;
-
-    fb->m_cntxt.r0 = (unsigned long) func;
-    fb->m_cntxt.r1 = (unsigned long) data;
+    fb->m_cntxt.r0 = (intptr_t) func;
+    fb->m_cntxt.r1 = (intptr_t) data;
 #endif
 
-    Service::root->m_resume.put(fb);
+    fb->resume();
+    now->m_fibers.putTail(&fb->m_link);
 
-    fb->Ref();
     fb->Ref();
 
     return fb;
 }
 
-void Service::switchtonext()
+void Service::doInterrupt()
+{
+    IDLE_PROC proc = m_InterCallback;
+
+    if (proc)
+    {
+        atom_xchg(&m_InterCallback, (IDLE_PROC)NULL);
+        proc();
+    }
+}
+
+void Service::switchConext()
 {
     while (1)
     {
+        doInterrupt();
+
         // First switch if we have work to do.
         if (!m_resume.empty())
         {
             Fiber *old = m_running;
 
-            m_running = m_resume.get();
+            m_running = m_resume.getHead();
 
-            fb_switch(&old->m_cntxt, &m_running->m_cntxt);
+            if (old != m_running)
+                old->m_cntxt.switchto(&m_running->m_cntxt);
 
             if (m_recycle)
             {
+                m_fibers.remove(&m_recycle->m_link);
                 m_recycle->m_joins.set();
                 m_recycle->Unref();
                 m_recycle = NULL;
@@ -174,49 +175,40 @@ void Service::switchtonext()
             break;
         }
 
-        // Then weakup async event.
+        int32_t nCount = 0;
+        int32_t time_0 = 0;
+        int32_t time_1 = time_0 + 2000;
+        int32_t time_2 = time_1 + 200;
+        int32_t time_3 = time_2 + 20;
+
         while (1)
         {
-            AsyncEvent *p = m_aEvents.get();
-            if (p == NULL)
+            doInterrupt();
+
+            if (nCount < 2000000)
+                nCount++;
+
+            if (!m_resume.empty())
                 break;
 
-            p->callback();
-        }
+            if (m_Idle)
+                m_Idle();
 
-        if (!m_resume.empty())
-            continue;
-
-        // doing smoething when we have time.
-        if (m_Idle)
-            m_Idle();
-
-        if (!m_resume.empty())
-            continue;
-
-        // if we still have time, weakup yield fiber.
-        while (1)
-        {
-            AsyncEvent *p = m_yieldList.get();
-            if (p == NULL)
+            if (!m_resume.empty())
                 break;
 
-            p->callback();
+            if (nCount > time_3)
+                OSThread::sleep(100);
+            else if (nCount > time_2)
+                OSThread::sleep(10);
+            else if (nCount > time_1)
+                OSThread::sleep(1);
+            else if (nCount > time_0)
+                OSThread::sleep(0);
         }
-
-        if (!m_resume.empty())
-            continue;
-
-        // still no work, we wait, and wait, and wait.....
-        m_aEvents.wait()->callback();
     }
-}
 
-void Service::yield()
-{
-    AsyncEvent ae;
-    m_yieldList.put(&ae);
-    ae.wait();
+    m_switchTimes.inc();
 }
 
 }

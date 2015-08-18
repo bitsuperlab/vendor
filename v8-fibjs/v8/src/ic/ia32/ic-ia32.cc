@@ -161,10 +161,9 @@ static void GenerateKeyedLoadReceiverCheck(MacroAssembler* masm,
   __ test_b(FieldOperand(map, Map::kBitFieldOffset),
             (1 << Map::kIsAccessCheckNeeded) | (1 << interceptor_bit));
   __ j(not_zero, slow);
-  // Check that the object is some kind of JS object EXCEPT JS Value type.
-  // In the case that the object is a value-wrapper object,
-  // we enter the runtime system to make sure that indexing
-  // into string objects works as intended.
+  // Check that the object is some kind of JS object EXCEPT JS Value type. In
+  // the case that the object is a value-wrapper object, we enter the runtime
+  // system to make sure that indexing into string objects works as intended.
   DCHECK(JS_OBJECT_TYPE > JS_VALUE_TYPE);
 
   __ CmpInstanceType(map, JS_OBJECT_TYPE);
@@ -176,7 +175,7 @@ static void GenerateKeyedLoadReceiverCheck(MacroAssembler* masm,
 static void GenerateFastArrayLoad(MacroAssembler* masm, Register receiver,
                                   Register key, Register scratch,
                                   Register scratch2, Register result,
-                                  Label* slow) {
+                                  Label* slow, LanguageMode language_mode) {
   // Register use:
   //   receiver - holds the receiver and is unchanged.
   //   key - holds the key and is unchanged (must be a smi).
@@ -186,7 +185,7 @@ static void GenerateFastArrayLoad(MacroAssembler* masm, Register receiver,
   //   result - holds the result on exit if the load succeeds and
   //            we fall through.
   Label check_prototypes, check_next_prototype;
-  Label done, in_bounds, return_undefined;
+  Label done, in_bounds, absent;
 
   __ mov(scratch, FieldOperand(receiver, JSObject::kElementsOffset));
   __ AssertFastElements(scratch);
@@ -204,7 +203,7 @@ static void GenerateFastArrayLoad(MacroAssembler* masm, Register receiver,
   __ mov(scratch2, FieldOperand(scratch2, Map::kPrototypeOffset));
   // scratch2: current prototype
   __ cmp(scratch2, masm->isolate()->factory()->null_value());
-  __ j(equal, &return_undefined);
+  __ j(equal, &absent);
   __ mov(scratch, FieldOperand(scratch2, JSObject::kElementsOffset));
   __ mov(scratch2, FieldOperand(scratch2, HeapObject::kMapOffset));
   // scratch: elements of current prototype
@@ -219,9 +218,14 @@ static void GenerateFastArrayLoad(MacroAssembler* masm, Register receiver,
   __ j(not_equal, slow);
   __ jmp(&check_next_prototype);
 
-  __ bind(&return_undefined);
-  __ mov(result, masm->isolate()->factory()->undefined_value());
-  __ jmp(&done);
+  __ bind(&absent);
+  if (is_strong(language_mode)) {
+    // Strong mode accesses must throw in this case, so call the runtime.
+    __ jmp(slow);
+  } else {
+    __ mov(result, masm->isolate()->factory()->undefined_value());
+    __ jmp(&done);
+  }
 
   __ bind(&in_bounds);
   // Fast case: Do the load.
@@ -267,7 +271,8 @@ static void GenerateKeyNameCheck(MacroAssembler* masm, Register key,
 }
 
 
-void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm) {
+void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
+                                      LanguageMode language_mode) {
   // The return address is on the stack.
   Label slow, check_name, index_smi, index_name, property_array_property;
   Label probe_dictionary, check_number_dictionary;
@@ -289,7 +294,8 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm) {
   // Check the receiver's map to see if it has fast elements.
   __ CheckFastElements(eax, &check_number_dictionary);
 
-  GenerateFastArrayLoad(masm, receiver, key, eax, ebx, eax, &slow);
+  GenerateFastArrayLoad(masm, receiver, key, eax, ebx, eax, &slow,
+                        language_mode);
   Isolate* isolate = masm->isolate();
   Counters* counters = isolate->counters();
   __ IncrementCounter(counters->keyed_load_generic_smi(), 1);
@@ -321,7 +327,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm) {
   __ bind(&slow);
   // Slow case: jump to runtime.
   __ IncrementCounter(counters->keyed_load_generic_slow(), 1);
-  GenerateRuntimeGetProperty(masm);
+  GenerateRuntimeGetProperty(masm, language_mode);
 
   __ bind(&check_name);
   GenerateKeyNameCheck(masm, key, eax, ebx, &index_name, &slow);
@@ -338,9 +344,10 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm) {
 
   // The handlers in the stub cache expect a vector and slot. Since we won't
   // change the IC from any downstream misses, a dummy vector can be used.
-  Handle<TypeFeedbackVector> dummy_vector = Handle<TypeFeedbackVector>::cast(
-      isolate->factory()->keyed_load_dummy_vector());
-  int slot = dummy_vector->GetIndex(FeedbackVectorICSlot(0));
+  Handle<TypeFeedbackVector> dummy_vector =
+      TypeFeedbackVector::DummyVector(isolate);
+  int slot = dummy_vector->GetIndex(
+      FeedbackVectorICSlot(TypeFeedbackVector::kDummyKeyedLoadICSlot));
   __ push(Immediate(Smi::FromInt(slot)));
   __ push(Immediate(dummy_vector));
 
@@ -536,8 +543,11 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
   __ JumpIfNotSmi(key, &maybe_name_key);
   __ CmpInstanceType(edi, JS_ARRAY_TYPE);
   __ j(equal, &array);
-  // Check that the object is some kind of JSObject.
-  __ CmpInstanceType(edi, FIRST_JS_OBJECT_TYPE);
+  // Check that the object is some kind of JS object EXCEPT JS Value type. In
+  // the case that the object is a value-wrapper object, we enter the runtime
+  // system to make sure that indexing into string objects works as intended.
+  STATIC_ASSERT(JS_VALUE_TYPE < JS_OBJECT_TYPE);
+  __ CmpInstanceType(edi, JS_OBJECT_TYPE);
   __ j(below, &slow);
 
   // Object case: Check key against length in the elements array.
@@ -557,10 +567,29 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
   __ mov(ebx, FieldOperand(key, HeapObject::kMapOffset));
   __ movzx_b(ebx, FieldOperand(ebx, Map::kInstanceTypeOffset));
   __ JumpIfNotUniqueNameInstanceType(ebx, &slow);
+
+
+  if (FLAG_vector_stores) {
+    // The handlers in the stub cache expect a vector and slot. Since we won't
+    // change the IC from any downstream misses, a dummy vector can be used.
+    Handle<TypeFeedbackVector> dummy_vector =
+        TypeFeedbackVector::DummyVector(masm->isolate());
+    int slot = dummy_vector->GetIndex(
+        FeedbackVectorICSlot(TypeFeedbackVector::kDummyKeyedStoreICSlot));
+    __ push(Immediate(Smi::FromInt(slot)));
+    __ push(Immediate(dummy_vector));
+  }
+
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::STORE_IC));
   masm->isolate()->stub_cache()->GenerateProbe(
       masm, Code::STORE_IC, flags, false, receiver, key, ebx, no_reg);
+
+  if (FLAG_vector_stores) {
+    __ pop(VectorStoreICDescriptor::VectorRegister());
+    __ pop(VectorStoreICDescriptor::SlotRegister());
+  }
+
   // Cache miss.
   __ jmp(&miss);
 
@@ -612,7 +641,7 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
 }
 
 
-void LoadIC::GenerateNormal(MacroAssembler* masm) {
+void LoadIC::GenerateNormal(MacroAssembler* masm, LanguageMode language_mode) {
   Register dictionary = eax;
   DCHECK(!dictionary.is(LoadDescriptor::ReceiverRegister()));
   DCHECK(!dictionary.is(LoadDescriptor::NameRegister()));
@@ -627,7 +656,7 @@ void LoadIC::GenerateNormal(MacroAssembler* masm) {
 
   // Dictionary load failed, go slow (but don't miss).
   __ bind(&slow);
-  GenerateRuntimeGetProperty(masm);
+  GenerateRuntimeGetProperty(masm, language_mode);
 }
 
 
@@ -655,14 +684,13 @@ void LoadIC::GenerateMiss(MacroAssembler* masm) {
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  ExternalReference ref =
-      ExternalReference(IC_Utility(kLoadIC_Miss), masm->isolate());
   int arg_count = 4;
-  __ TailCallExternalReference(ref, arg_count, 1);
+  __ TailCallRuntime(Runtime::kLoadIC_Miss, arg_count, 1);
 }
 
 
-void LoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm) {
+void LoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
+                                        LanguageMode language_mode) {
   // Return address is on the stack.
   Register receiver = LoadDescriptor::ReceiverRegister();
   Register name = LoadDescriptor::NameRegister();
@@ -673,8 +701,10 @@ void LoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm) {
   __ push(name);
   __ push(ebx);
 
-  // Perform tail call to the entry.
-  __ TailCallRuntime(Runtime::kGetProperty, 2, 1);
+  // Do tail-call to runtime routine.
+  __ TailCallRuntime(is_strong(language_mode) ? Runtime::kGetPropertyStrong
+                                              : Runtime::kGetProperty,
+                     2, 1);
 }
 
 
@@ -685,14 +715,13 @@ void KeyedLoadIC::GenerateMiss(MacroAssembler* masm) {
   LoadIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  ExternalReference ref =
-      ExternalReference(IC_Utility(kKeyedLoadIC_Miss), masm->isolate());
   int arg_count = 4;
-  __ TailCallExternalReference(ref, arg_count, 1);
+  __ TailCallRuntime(Runtime::kKeyedLoadIC_Miss, arg_count, 1);
 }
 
 
-void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm) {
+void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
+                                             LanguageMode language_mode) {
   // Return address is on the stack.
   Register receiver = LoadDescriptor::ReceiverRegister();
   Register name = LoadDescriptor::NameRegister();
@@ -703,8 +732,10 @@ void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm) {
   __ push(name);
   __ push(ebx);
 
-  // Perform tail call to the entry.
-  __ TailCallRuntime(Runtime::kKeyedGetProperty, 2, 1);
+  // Do tail-call to runtime routine.
+  __ TailCallRuntime(is_strong(language_mode) ? Runtime::kKeyedGetPropertyStrong
+                                              : Runtime::kKeyedGetProperty,
+                     2, 1);
 }
 
 
@@ -726,13 +757,24 @@ static void StoreIC_PushArgs(MacroAssembler* masm) {
   Register name = StoreDescriptor::NameRegister();
   Register value = StoreDescriptor::ValueRegister();
 
-  DCHECK(!ebx.is(receiver) && !ebx.is(name) && !ebx.is(value));
+  if (FLAG_vector_stores) {
+    Register slot = VectorStoreICDescriptor::SlotRegister();
+    Register vector = VectorStoreICDescriptor::VectorRegister();
 
-  __ pop(ebx);
-  __ push(receiver);
-  __ push(name);
-  __ push(value);
-  __ push(ebx);
+    __ xchg(receiver, Operand(esp, 0));
+    __ push(name);
+    __ push(value);
+    __ push(slot);
+    __ push(vector);
+    __ push(receiver);  // Contains the return address.
+  } else {
+    DCHECK(!ebx.is(receiver) && !ebx.is(name) && !ebx.is(value));
+    __ pop(ebx);
+    __ push(receiver);
+    __ push(name);
+    __ push(value);
+    __ push(ebx);
+  }
 }
 
 
@@ -741,9 +783,8 @@ void StoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
   // Perform tail call to the entry.
-  ExternalReference ref =
-      ExternalReference(IC_Utility(kStoreIC_Miss), masm->isolate());
-  __ TailCallExternalReference(ref, 3, 1);
+  int args = FLAG_vector_stores ? 5 : 3;
+  __ TailCallRuntime(Runtime::kStoreIC_Miss, args, 1);
 }
 
 
@@ -779,9 +820,8 @@ void KeyedStoreIC::GenerateMiss(MacroAssembler* masm) {
   StoreIC_PushArgs(masm);
 
   // Do tail-call to runtime routine.
-  ExternalReference ref =
-      ExternalReference(IC_Utility(kKeyedStoreIC_Miss), masm->isolate());
-  __ TailCallExternalReference(ref, 3, 1);
+  int args = FLAG_vector_stores ? 5 : 3;
+  __ TailCallRuntime(Runtime::kKeyedStoreIC_Miss, args, 1);
 }
 
 

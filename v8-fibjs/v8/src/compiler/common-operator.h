@@ -27,6 +27,19 @@ class Operator;
 // Prediction hint for branches.
 enum class BranchHint : uint8_t { kNone, kTrue, kFalse };
 
+inline BranchHint NegateBranchHint(BranchHint hint) {
+  switch (hint) {
+    case BranchHint::kNone:
+      return hint;
+    case BranchHint::kTrue:
+      return BranchHint::kFalse;
+    case BranchHint::kFalse:
+      return BranchHint::kTrue;
+  }
+  UNREACHABLE();
+  return hint;
+}
+
 inline size_t hash_value(BranchHint hint) { return static_cast<size_t>(hint); }
 
 std::ostream& operator<<(std::ostream&, BranchHint);
@@ -111,7 +124,7 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* Return();
   const Operator* Terminate();
 
-  const Operator* Start(int num_formal_parameters);
+  const Operator* Start(int value_output_count);
   const Operator* Loop(int control_input_count);
   const Operator* Merge(int control_input_count);
   const Operator* Parameter(int index, const char* debug_name = nullptr);
@@ -136,10 +149,9 @@ class CommonOperatorBuilder final : public ZoneObject {
   const Operator* Finish(int arguments);
   const Operator* StateValues(int arguments);
   const Operator* TypedStateValues(const ZoneVector<MachineType>* types);
-  const Operator* FrameState(FrameStateType type, BailoutId bailout_id,
+  const Operator* FrameState(BailoutId bailout_id,
                              OutputFrameStateCombine state_combine,
-                             MaybeHandle<SharedFunctionInfo> shared_info =
-                                 MaybeHandle<SharedFunctionInfo>());
+                             const FrameStateFunctionInfo* function_info);
   const Operator* Call(const CallDescriptor* descriptor);
   const Operator* TailCall(const CallDescriptor* descriptor);
   const Operator* Projection(size_t index);
@@ -147,6 +159,12 @@ class CommonOperatorBuilder final : public ZoneObject {
   // Constructs a new merge or phi operator with the same opcode as {op}, but
   // with {size} inputs.
   const Operator* ResizeMergeOrPhi(const Operator* op, int size);
+
+  // Constructs function info for frame state construction.
+  const FrameStateFunctionInfo* CreateFrameStateFunctionInfo(
+      FrameStateType type, int parameter_count, int local_count,
+      Handle<SharedFunctionInfo> shared_info,
+      ContextCallingMode context_calling_mode);
 
  private:
   Zone* zone() const { return zone_; }

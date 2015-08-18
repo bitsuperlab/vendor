@@ -953,57 +953,58 @@ TIMER_EVENTS_LIST(V)
 #undef V
 
 
-void Logger::LogRegExpSource(Handle<JSRegExp> regexp) {
+namespace {
+// Emits the source code of a regexp. Used by regexp events.
+void LogRegExpSource(Handle<JSRegExp> regexp, Isolate* isolate,
+                     Log::MessageBuilder* msg) {
   // Prints "/" + re.source + "/" +
   //      (re.global?"g":"") + (re.ignorecase?"i":"") + (re.multiline?"m":"")
-  Log::MessageBuilder msg(log_);
 
-  Handle<Object> source = Object::GetProperty(
-      isolate_, regexp, "source").ToHandleChecked();
+  Handle<Object> source =
+      Object::GetProperty(isolate, regexp, "source").ToHandleChecked();
   if (!source->IsString()) {
-    msg.Append("no source");
+    msg->Append("no source");
     return;
   }
 
   switch (regexp->TypeTag()) {
     case JSRegExp::ATOM:
-      msg.Append('a');
+      msg->Append('a');
       break;
     default:
       break;
   }
-  msg.Append('/');
-  msg.AppendDetailed(*Handle<String>::cast(source), false);
-  msg.Append('/');
+  msg->Append('/');
+  msg->AppendDetailed(*Handle<String>::cast(source), false);
+  msg->Append('/');
 
   // global flag
-  Handle<Object> global = Object::GetProperty(
-      isolate_, regexp, "global").ToHandleChecked();
+  Handle<Object> global =
+      Object::GetProperty(isolate, regexp, "global").ToHandleChecked();
   if (global->IsTrue()) {
-    msg.Append('g');
+    msg->Append('g');
   }
   // ignorecase flag
-  Handle<Object> ignorecase = Object::GetProperty(
-      isolate_, regexp, "ignoreCase").ToHandleChecked();
+  Handle<Object> ignorecase =
+      Object::GetProperty(isolate, regexp, "ignoreCase").ToHandleChecked();
   if (ignorecase->IsTrue()) {
-    msg.Append('i');
+    msg->Append('i');
   }
   // multiline flag
-  Handle<Object> multiline = Object::GetProperty(
-      isolate_, regexp, "multiline").ToHandleChecked();
+  Handle<Object> multiline =
+      Object::GetProperty(isolate, regexp, "multiline").ToHandleChecked();
   if (multiline->IsTrue()) {
-    msg.Append('m');
+    msg->Append('m');
   }
-
-  msg.WriteToLogFile();
 }
+}  // namespace
 
 
 void Logger::RegExpCompileEvent(Handle<JSRegExp> regexp, bool in_cache) {
   if (!log_->IsEnabled() || !FLAG_log_regexp) return;
   Log::MessageBuilder msg(log_);
   msg.Append("regexp-compile,");
-  LogRegExpSource(regexp);
+  LogRegExpSource(regexp, isolate_, &msg);
   msg.Append(in_cache ? ",hit" : ",miss");
   msg.WriteToLogFile();
 }
@@ -1015,10 +1016,10 @@ void Logger::ApiNamedPropertyAccess(const char* tag,
   DCHECK(name->IsName());
   if (!log_->IsEnabled() || !FLAG_log_api) return;
   String* class_name_obj = holder->class_name();
-  SmartArrayPointer<char> class_name =
+  base::SmartArrayPointer<char> class_name =
       class_name_obj->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   if (name->IsString()) {
-    SmartArrayPointer<char> property_name =
+    base::SmartArrayPointer<char> property_name =
         String::cast(name)->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
     ApiEvent("api,%s,\"%s\",\"%s\"", tag, class_name.get(),
              property_name.get());
@@ -1028,8 +1029,9 @@ void Logger::ApiNamedPropertyAccess(const char* tag,
     if (symbol->name()->IsUndefined()) {
       ApiEvent("api,%s,\"%s\",symbol(hash %x)", tag, class_name.get(), hash);
     } else {
-      SmartArrayPointer<char> str = String::cast(symbol->name())->ToCString(
-          DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
+      base::SmartArrayPointer<char> str =
+          String::cast(symbol->name())
+              ->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
       ApiEvent("api,%s,\"%s\",symbol(\"%s\" hash %x)", tag, class_name.get(),
                str.get(), hash);
     }
@@ -1041,7 +1043,7 @@ void Logger::ApiIndexedPropertyAccess(const char* tag,
                                       uint32_t index) {
   if (!log_->IsEnabled() || !FLAG_log_api) return;
   String* class_name_obj = holder->class_name();
-  SmartArrayPointer<char> class_name =
+  base::SmartArrayPointer<char> class_name =
       class_name_obj->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   ApiEvent("api,%s,\"%s\",%u", tag, class_name.get(), index);
 }
@@ -1050,7 +1052,7 @@ void Logger::ApiIndexedPropertyAccess(const char* tag,
 void Logger::ApiObjectAccess(const char* tag, JSObject* object) {
   if (!log_->IsEnabled() || !FLAG_log_api) return;
   String* class_name_obj = object->class_name();
-  SmartArrayPointer<char> class_name =
+  base::SmartArrayPointer<char> class_name =
       class_name_obj->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   ApiEvent("api,%s,\"%s\"", tag, class_name.get());
 }
@@ -1088,7 +1090,7 @@ void Logger::CallbackEventInternal(const char* prefix, Name* name,
              kLogEventsNames[CALLBACK_TAG]);
   msg.AppendAddress(entry_point);
   if (name->IsString()) {
-    SmartArrayPointer<char> str =
+    base::SmartArrayPointer<char> str =
         String::cast(name)->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
     msg.Append(",1,\"%s%s\"", prefix, str.get());
   } else {
@@ -1096,8 +1098,9 @@ void Logger::CallbackEventInternal(const char* prefix, Name* name,
     if (symbol->name()->IsUndefined()) {
       msg.Append(",1,symbol(hash %x)", prefix, symbol->Hash());
     } else {
-      SmartArrayPointer<char> str = String::cast(symbol->name())->ToCString(
-          DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
+      base::SmartArrayPointer<char> str =
+          String::cast(symbol->name())
+              ->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
       msg.Append(",1,symbol(\"%s\" hash %x)", prefix, str.get(),
                  symbol->Hash());
     }
@@ -1191,7 +1194,7 @@ void Logger::CodeCreateEvent(LogEventsAndTags tag,
   Log::MessageBuilder msg(log_);
   AppendCodeCreateHeader(&msg, tag, code);
   if (name->IsString()) {
-    SmartArrayPointer<char> str =
+    base::SmartArrayPointer<char> str =
         String::cast(name)->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
     msg.Append("\"%s\"", str.get());
   } else {
@@ -1221,12 +1224,12 @@ void Logger::CodeCreateEvent(LogEventsAndTags tag,
   if (!FLAG_log_code || !log_->IsEnabled()) return;
   Log::MessageBuilder msg(log_);
   AppendCodeCreateHeader(&msg, tag, code);
-  SmartArrayPointer<char> name =
+  base::SmartArrayPointer<char> name =
       shared->DebugName()->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   msg.Append("\"%s ", name.get());
   if (source->IsString()) {
-    SmartArrayPointer<char> sourcestr =
-       String::cast(source)->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
+    base::SmartArrayPointer<char> sourcestr = String::cast(source)->ToCString(
+        DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
     msg.Append("%s", sourcestr.get());
   } else {
     msg.AppendSymbolName(Symbol::cast(source));
@@ -1264,7 +1267,7 @@ void Logger::CodeDisableOptEvent(Code* code,
   if (!FLAG_log_code || !log_->IsEnabled()) return;
   Log::MessageBuilder msg(log_);
   msg.Append("%s,", kLogEventsNames[CODE_DISABLE_OPT_EVENT]);
-  SmartArrayPointer<char> name =
+  base::SmartArrayPointer<char> name =
       shared->DebugName()->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
   msg.Append("\"%s\",", name.get());
   msg.Append("\"%s\"", GetBailoutReason(shared->disable_optimization_reason()));
@@ -1610,7 +1613,7 @@ void Logger::LogCodeObject(Object* object) {
       tag = Logger::REG_EXP_TAG;
       break;
     case Code::BUILTIN:
-      description = "A builtin from the snapshot";
+      description = isolate_->builtins()->name(code_object->builtin_index());
       tag = Logger::BUILTIN_TAG;
       break;
     case Code::HANDLER:

@@ -223,6 +223,7 @@ Handle<String> TransitionArray::ExpectedTransitionKey(Handle<Map> map) {
 
 // static
 bool TransitionArray::CanHaveMoreTransitions(Handle<Map> map) {
+  if (map->is_dictionary_map()) return false;
   Object* raw_transitions = map->raw_transitions();
   if (IsFullTransitionArray(raw_transitions)) {
     TransitionArray* transitions = TransitionArray::cast(raw_transitions);
@@ -254,8 +255,10 @@ void TransitionArray::PutPrototypeTransition(Handle<Map> map,
     // Grow array by factor 2 up to MaxCachedPrototypeTransitions.
     int new_capacity = Min(kMaxCachedPrototypeTransitions, transitions * 2);
     if (new_capacity == capacity) return;
+    int grow_by = new_capacity - capacity;
 
-    cache = FixedArray::CopySize(cache, header + new_capacity);
+    Isolate* isolate = map->GetIsolate();
+    cache = isolate->factory()->CopyFixedArrayAndGrow(cache, grow_by);
     if (capacity < 0) {
       // There was no prototype transitions array before, so the size
       // couldn't be copied. Initialize it explicitly.

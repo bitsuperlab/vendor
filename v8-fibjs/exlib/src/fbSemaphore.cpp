@@ -7,45 +7,58 @@
  */
 
 #include "service.h"
+#include <assert.h>
 
 namespace exlib
 {
 
 void Semaphore::wait()
 {
+    m_lock.lock();
+
     if (m_count == 0)
     {
-        Service *pService = Service::getFiberService();
+        Thread_base* current = Thread_base::current();
+        assert(current != 0);
 
-        if (pService)
-        {
-            m_blocks.put(pService->m_running);
-            pService->switchtonext();
-        }
+        m_blocks.putTail(current);
+        m_lock.unlock();
+
+        current->suspend();
     }
     else
+    {
         m_count--;
+        m_lock.unlock();
+    }
 }
 
 void Semaphore::post()
 {
-    if (!m_blocks.empty())
-    {
-        Service *pService = Service::getFiberService();
+    Thread_base* fb;
 
-        if (pService)
-            pService->m_resume.put(m_blocks.get());
-    }
-    else
+    m_lock.lock();
+    fb = m_blocks.getHead();
+    if (fb == 0)
         m_count++;
+    m_lock.unlock();
+
+    if (fb != 0)
+        fb->resume();
 }
 
 bool Semaphore::trywait()
 {
+    m_lock.lock();
     if (m_count == 0)
+    {
+        m_lock.unlock();
         return false;
+    }
 
     m_count--;
+    m_lock.unlock();
+
     return true;
 }
 

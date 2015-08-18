@@ -6,6 +6,7 @@
 
 #include "src/base/bits.h"
 #include "src/double.h"
+#include "src/elements.h"
 #include "src/factory.h"
 #include "src/hydrogen-infer-representation.h"
 
@@ -819,6 +820,7 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kLeaveInlined:
     case HValue::kLoadFieldByIndex:
     case HValue::kLoadGlobalGeneric:
+    case HValue::kLoadGlobalViaContext:
     case HValue::kLoadNamedField:
     case HValue::kLoadNamedGeneric:
     case HValue::kLoadRoot:
@@ -832,6 +834,7 @@ bool HInstruction::CanDeoptimize() {
     case HValue::kSeqStringGetChar:
     case HValue::kStoreCodeEntry:
     case HValue::kStoreFrameContext:
+    case HValue::kStoreGlobalViaContext:
     case HValue::kStoreKeyed:
     case HValue::kStoreNamedField:
     case HValue::kStoreNamedGeneric:
@@ -1157,7 +1160,8 @@ Representation HBranch::observed_input_representation(int index) {
   if (expected_input_types_.Contains(ToBooleanStub::NULL_TYPE) ||
       expected_input_types_.Contains(ToBooleanStub::SPEC_OBJECT) ||
       expected_input_types_.Contains(ToBooleanStub::STRING) ||
-      expected_input_types_.Contains(ToBooleanStub::SYMBOL)) {
+      expected_input_types_.Contains(ToBooleanStub::SYMBOL) ||
+      expected_input_types_.Contains(ToBooleanStub::SIMD_VALUE)) {
     return Representation::Tagged();
   }
   if (expected_input_types_.Contains(ToBooleanStub::UNDEFINED)) {
@@ -1322,6 +1326,20 @@ static String* TypeOfString(HConstant* constant, Isolate* isolate) {
     }
     case SYMBOL_TYPE:
       return heap->symbol_string();
+    case FLOAT32X4_TYPE:
+      return heap->float32x4_string();
+    case INT32X4_TYPE:
+      return heap->int32x4_string();
+    case BOOL32X4_TYPE:
+      return heap->bool32x4_string();
+    case INT16X8_TYPE:
+      return heap->int16x8_string();
+    case BOOL16X8_TYPE:
+      return heap->bool16x8_string();
+    case INT8X16_TYPE:
+      return heap->int8x16_string();
+    case BOOL8X16_TYPE:
+      return heap->bool8x16_string();
     case JS_FUNCTION_TYPE:
     case JS_FUNCTION_PROXY_TYPE:
       return heap->function_string();
@@ -1426,6 +1444,17 @@ HValue* HBitwise::Canonicalize() {
 }
 
 
+// static
+HInstruction* HAdd::New(Isolate* isolate, Zone* zone, HValue* context,
+                        HValue* left, HValue* right, Strength strength,
+                        ExternalAddType external_add_type) {
+  // For everything else, you should use the other factory method without
+  // ExternalAddType.
+  DCHECK_EQ(external_add_type, AddOfExternalAndTagged);
+  return new (zone) HAdd(context, left, right, strength, external_add_type);
+}
+
+
 Representation HAdd::RepresentationFromInputs() {
   Representation left_rep = left()->representation();
   if (left_rep.IsExternal()) {
@@ -1439,7 +1468,11 @@ Representation HAdd::RequiredInputRepresentation(int index) {
   if (index == 2) {
     Representation left_rep = left()->representation();
     if (left_rep.IsExternal()) {
-      return Representation::Integer32();
+      if (external_add_type_ == AddOfExternalAndTagged) {
+        return Representation::Tagged();
+      } else {
+        return Representation::Integer32();
+      }
     }
   }
   return HArithmeticBinaryOperation::RequiredInputRepresentation(index);
@@ -3186,18 +3219,13 @@ Range* HLoadNamedField::InferRange(Zone* zone) {
 
 Range* HLoadKeyed::InferRange(Zone* zone) {
   switch (elements_kind()) {
-    case EXTERNAL_INT8_ELEMENTS:
     case INT8_ELEMENTS:
       return new(zone) Range(kMinInt8, kMaxInt8);
-    case EXTERNAL_UINT8_ELEMENTS:
-    case EXTERNAL_UINT8_CLAMPED_ELEMENTS:
     case UINT8_ELEMENTS:
     case UINT8_CLAMPED_ELEMENTS:
       return new(zone) Range(kMinUInt8, kMaxUInt8);
-    case EXTERNAL_INT16_ELEMENTS:
     case INT16_ELEMENTS:
       return new(zone) Range(kMinInt16, kMaxInt16);
-    case EXTERNAL_UINT16_ELEMENTS:
     case UINT16_ELEMENTS:
       return new(zone) Range(kMinUInt16, kMaxUInt16);
     default:
@@ -3403,7 +3431,7 @@ void HCompareNumericAndBranch::InferRepresentation(
     // (false). Therefore, any comparisons other than ordered relational
     // comparisons must cause a deopt when one of their arguments is undefined.
     // See also v8:1434
-    if (Token::IsOrderedRelationalCompareOp(token_)) {
+    if (Token::IsOrderedRelationalCompareOp(token_) && !is_strong(strength())) {
       SetFlag(kAllowUndefinedAsNaN);
     }
   }
@@ -3440,11 +3468,11 @@ std::ostream& HLoadNamedGeneric::PrintDataTo(
 
 
 std::ostream& HLoadKeyed::PrintDataTo(std::ostream& os) const {  // NOLINT
-  if (!is_external()) {
+  if (!is_fixed_typed_array()) {
     os << NameOf(elements());
   } else {
-    DCHECK(elements_kind() >= FIRST_EXTERNAL_ARRAY_ELEMENTS_KIND &&
-           elements_kind() <= LAST_EXTERNAL_ARRAY_ELEMENTS_KIND);
+    DCHECK(elements_kind() >= FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND &&
+           elements_kind() <= LAST_FIXED_TYPED_ARRAY_ELEMENTS_KIND);
     os << NameOf(elements()) << "." << ElementsKindToString(elements_kind());
   }
 
@@ -3479,7 +3507,7 @@ bool HLoadKeyed::UsesMustHandleHole() const {
     return false;
   }
 
-  if (IsExternalArrayElementsKind(elements_kind())) {
+  if (IsFixedTypedArrayElementsKind(elements_kind())) {
     return false;
   }
 
@@ -3519,7 +3547,7 @@ bool HLoadKeyed::RequiresHoleCheck() const {
     return false;
   }
 
-  if (IsExternalArrayElementsKind(elements_kind())) {
+  if (IsFixedTypedArrayElementsKind(elements_kind())) {
     return false;
   }
 
@@ -3578,6 +3606,13 @@ std::ostream& HStoreNamedGeneric::PrintDataTo(
 }
 
 
+std::ostream& HStoreGlobalViaContext::PrintDataTo(
+    std::ostream& os) const {  // NOLINT
+  return os << " depth:" << depth() << " slot:" << slot_index() << " = "
+            << NameOf(value());
+}
+
+
 std::ostream& HStoreNamedField::PrintDataTo(std::ostream& os) const {  // NOLINT
   os << NameOf(object()) << access_ << " = " << NameOf(value());
   if (NeedsWriteBarrier()) os << " (write-barrier)";
@@ -3587,11 +3622,11 @@ std::ostream& HStoreNamedField::PrintDataTo(std::ostream& os) const {  // NOLINT
 
 
 std::ostream& HStoreKeyed::PrintDataTo(std::ostream& os) const {  // NOLINT
-  if (!is_external()) {
+  if (!is_fixed_typed_array()) {
     os << NameOf(elements());
   } else {
-    DCHECK(elements_kind() >= FIRST_EXTERNAL_ARRAY_ELEMENTS_KIND &&
-           elements_kind() <= LAST_EXTERNAL_ARRAY_ELEMENTS_KIND);
+    DCHECK(elements_kind() >= FIRST_FIXED_TYPED_ARRAY_ELEMENTS_KIND &&
+           elements_kind() <= LAST_FIXED_TYPED_ARRAY_ELEMENTS_KIND);
     os << NameOf(elements()) << "." << ElementsKindToString(elements_kind());
   }
 
@@ -3625,6 +3660,12 @@ std::ostream& HTransitionElementsKind::PrintDataTo(
 std::ostream& HLoadGlobalGeneric::PrintDataTo(
     std::ostream& os) const {  // NOLINT
   return os << name()->ToCString().get() << " ";
+}
+
+
+std::ostream& HLoadGlobalViaContext::PrintDataTo(
+    std::ostream& os) const {  // NOLINT
+  return os << "depth:" << depth() << " slot:" << slot_index();
 }
 
 
@@ -3948,8 +3989,7 @@ bool HStoreKeyed::NeedsCanonicalization() {
   switch (value()->opcode()) {
     case kLoadKeyed: {
       ElementsKind load_kind = HLoadKeyed::cast(value())->elements_kind();
-      return IsExternalFloatOrDoubleElementsKind(load_kind) ||
-             IsFixedFloatElementsKind(load_kind);
+      return IsFixedFloatElementsKind(load_kind);
     }
     case kChange: {
       Representation from = HChange::cast(value())->from();

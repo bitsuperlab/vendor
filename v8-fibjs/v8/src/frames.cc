@@ -12,7 +12,7 @@
 #include "src/base/bits.h"
 #include "src/deoptimizer.h"
 #include "src/frames-inl.h"
-#include "src/full-codegen.h"
+#include "src/full-codegen/full-codegen.h"
 #include "src/heap/mark-compact.h"
 #include "src/safepoint-table.h"
 #include "src/scopeinfo.h"
@@ -730,9 +730,24 @@ bool JavaScriptFrame::IsConstructor() const {
 }
 
 
+Object* JavaScriptFrame::GetOriginalConstructor() const {
+  Address fp = caller_fp();
+  if (has_adapted_arguments()) {
+    // Skip the arguments adaptor frame and look at the real caller.
+    fp = Memory::Address_at(fp + StandardFrameConstants::kCallerFPOffset);
+  }
+  DCHECK(IsConstructFrame(fp));
+  STATIC_ASSERT(ConstructFrameConstants::kOriginalConstructorOffset ==
+                StandardFrameConstants::kExpressionsOffset - 3 * kPointerSize);
+  return GetExpression(fp, 3);
+}
+
+
 int JavaScriptFrame::GetArgumentsLength() const {
   // If there is an arguments adaptor frame get the arguments length from it.
   if (has_adapted_arguments()) {
+    STATIC_ASSERT(ArgumentsAdaptorFrameConstants::kLengthOffset ==
+                  StandardFrameConstants::kExpressionsOffset);
     return Smi::cast(GetExpression(caller_fp(), 0))->value();
   } else {
     return GetNumberOfIncomingArguments();
@@ -804,7 +819,7 @@ void JavaScriptFrame::PrintFunctionAndOffset(JSFunction* function, Code* code,
       Object* script_name_raw = script->name();
       if (script_name_raw->IsString()) {
         String* script_name = String::cast(script->name());
-        SmartArrayPointer<char> c_script_name =
+        base::SmartArrayPointer<char> c_script_name =
             script_name->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL);
         PrintF(file, " at %s:%d", c_script_name.get(), line);
       } else {
@@ -960,7 +975,7 @@ void OptimizedFrame::Summarize(List<FrameSummary>* frames) {
           Deoptimizer::GetOutputInfo(output_data, ast_id, shared_info);
       unsigned const pc_offset =
           FullCodeGenerator::PcField::decode(entry) + Code::kHeaderSize;
-      DCHECK_NE(0, pc_offset);
+      DCHECK_NE(0U, pc_offset);
 
       FrameSummary summary(receiver, function, code, pc_offset, is_constructor);
       frames->Add(summary);
@@ -1120,6 +1135,24 @@ void StackFrame::PrintIndex(StringStream* accumulator,
 }
 
 
+namespace {
+
+
+void PrintFunctionSource(StringStream* accumulator, SharedFunctionInfo* shared,
+                         Code* code) {
+  if (FLAG_max_stack_trace_source_length != 0 && code != NULL) {
+    std::ostringstream os;
+    os << "--------- s o u r c e   c o d e ---------\n"
+       << SourceCodeOf(shared, FLAG_max_stack_trace_source_length)
+       << "\n-----------------------------------------\n";
+    accumulator->Add(os.str().c_str());
+  }
+}
+
+
+}  // namespace
+
+
 void JavaScriptFrame::Print(StringStream* accumulator,
                             PrintMode mode,
                             int index) const {
@@ -1157,7 +1190,7 @@ void JavaScriptFrame::Print(StringStream* accumulator,
       accumulator->Add(":~%d", line);
     }
 
-    accumulator->Add("] ");
+    accumulator->Add("] [pc=%p] ", pc);
   }
 
   accumulator->Add("(this=%o", receiver);
@@ -1182,7 +1215,9 @@ void JavaScriptFrame::Print(StringStream* accumulator,
     return;
   }
   if (is_optimized()) {
-    accumulator->Add(" {\n// optimized frame\n}\n");
+    accumulator->Add(" {\n// optimized frame\n");
+    PrintFunctionSource(accumulator, shared, code);
+    accumulator->Add("}\n");
     return;
   }
   accumulator->Add(" {\n");
@@ -1249,15 +1284,7 @@ void JavaScriptFrame::Print(StringStream* accumulator,
     accumulator->Add("  [%02d] : %o\n", i, GetExpression(i));
   }
 
-  // Print details about the function.
-  if (FLAG_max_stack_trace_source_length != 0 && code != NULL) {
-    std::ostringstream os;
-    SharedFunctionInfo* shared = function->shared();
-    os << "--------- s o u r c e   c o d e ---------\n"
-       << SourceCodeOf(shared, FLAG_max_stack_trace_source_length)
-       << "\n-----------------------------------------\n";
-    accumulator->Add(os.str().c_str());
-  }
+  PrintFunctionSource(accumulator, shared, code);
 
   accumulator->Add("}\n\n");
 }
@@ -1418,6 +1445,9 @@ Code* InnerPointerToCodeCache::GcSafeFindCodeForInnerPointer(
   // Iterate through the page until we reach the end or find an object starting
   // after the inner pointer.
   Page* page = Page::FromAddress(inner_pointer);
+
+  DCHECK_EQ(page->owner(), heap->code_space());
+  heap->mark_compact_collector()->SweepOrWaitUntilSweepingCompleted(page);
 
   Address addr = page->skip_list()->StartFor(inner_pointer);
 

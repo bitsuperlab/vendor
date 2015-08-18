@@ -7,6 +7,7 @@
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/heap/objects-visiting.h"
+#include "src/interpreter/bytecodes.h"
 #include "src/jsregexp.h"
 #include "src/ostreams.h"
 
@@ -63,6 +64,24 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case FLOAT32X4_TYPE:
       Float32x4::cast(this)->Float32x4Print(os);
       break;
+    case INT32X4_TYPE:
+      Int32x4::cast(this)->Int32x4Print(os);
+      break;
+    case BOOL32X4_TYPE:
+      Bool32x4::cast(this)->Bool32x4Print(os);
+      break;
+    case INT16X8_TYPE:
+      Int16x8::cast(this)->Int16x8Print(os);
+      break;
+    case BOOL16X8_TYPE:
+      Bool16x8::cast(this)->Bool16x8Print(os);
+      break;
+    case INT8X16_TYPE:
+      Int16x8::cast(this)->Int16x8Print(os);
+      break;
+    case BOOL8X16_TYPE:
+      Bool16x8::cast(this)->Bool16x8Print(os);
+      break;
     case FIXED_DOUBLE_ARRAY_TYPE:
       FixedDoubleArray::cast(this)->FixedDoubleArrayPrint(os);
       break;
@@ -72,17 +91,12 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
     case BYTE_ARRAY_TYPE:
       ByteArray::cast(this)->ByteArrayPrint(os);
       break;
+    case BYTECODE_ARRAY_TYPE:
+      BytecodeArray::cast(this)->BytecodeArrayPrint(os);
+      break;
     case FREE_SPACE_TYPE:
       FreeSpace::cast(this)->FreeSpacePrint(os);
       break;
-
-#define PRINT_EXTERNAL_ARRAY(Type, type, TYPE, ctype, size)            \
-  case EXTERNAL_##TYPE##_ARRAY_TYPE:                                   \
-    External##Type##Array::cast(this)->External##Type##ArrayPrint(os); \
-    break;
-
-     TYPED_ARRAYS(PRINT_EXTERNAL_ARRAY)
-#undef PRINT_EXTERNAL_ARRAY
 
 #define PRINT_FIXED_TYPED_ARRAY(Type, type, TYPE, ctype, size) \
   case Fixed##Type##Array::kInstanceType:                      \
@@ -196,24 +210,87 @@ void HeapObject::HeapObjectPrint(std::ostream& os) {  // NOLINT
 }
 
 
+void Float32x4::Float32x4Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(DoubleToCString(get_lane(0), buffer)) << ", "
+     << std::string(DoubleToCString(get_lane(1), buffer)) << ", "
+     << std::string(DoubleToCString(get_lane(2), buffer)) << ", "
+     << std::string(DoubleToCString(get_lane(3), buffer));
+}
+
+
+void Int32x4::Int32x4Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(IntToCString(get_lane(0), buffer)) << ", "
+     << std::string(IntToCString(get_lane(1), buffer)) << ", "
+     << std::string(IntToCString(get_lane(2), buffer)) << ", "
+     << std::string(IntToCString(get_lane(3), buffer));
+}
+
+
+void Bool32x4::Bool32x4Print(std::ostream& os) {  // NOLINT
+  os << std::string(get_lane(0) ? "true" : "false") << ", "
+     << std::string(get_lane(1) ? "true" : "false") << ", "
+     << std::string(get_lane(2) ? "true" : "false") << ", "
+     << std::string(get_lane(3) ? "true" : "false");
+}
+
+
+void Int16x8::Int16x8Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(IntToCString(get_lane(0), buffer));
+  for (int i = 1; i < 8; i++) {
+    os << ", " << std::string(IntToCString(get_lane(i), buffer));
+  }
+}
+
+
+void Bool16x8::Bool16x8Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(get_lane(0) ? "true" : "false");
+  for (int i = 1; i < 8; i++) {
+    os << ", " << std::string(get_lane(i) ? "true" : "false");
+  }
+}
+
+
+void Int8x16::Int8x16Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(IntToCString(get_lane(0), buffer));
+  for (int i = 1; i < 16; i++) {
+    os << ", " << std::string(IntToCString(get_lane(i), buffer));
+  }
+}
+
+
+void Bool8x16::Bool8x16Print(std::ostream& os) {  // NOLINT
+  char arr[100];
+  Vector<char> buffer(arr, arraysize(arr));
+  os << std::string(get_lane(0) ? "true" : "false");
+  for (int i = 1; i < 16; i++) {
+    os << ", " << std::string(get_lane(i) ? "true" : "false");
+  }
+}
+
+
 void ByteArray::ByteArrayPrint(std::ostream& os) {  // NOLINT
   os << "byte array, data starts at " << GetDataStartAddress();
+}
+
+
+void BytecodeArray::BytecodeArrayPrint(std::ostream& os) {  // NOLINT
+  Disassemble(os);
 }
 
 
 void FreeSpace::FreeSpacePrint(std::ostream& os) {  // NOLINT
   os << "free space, size " << Size();
 }
-
-
-#define EXTERNAL_ARRAY_PRINTER(Type, type, TYPE, ctype, size)                \
-  void External##Type##Array::External##Type##ArrayPrint(std::ostream& os) { \
-    os << "external " #type " array";                                        \
-  }
-
-TYPED_ARRAYS(EXTERNAL_ARRAY_PRINTER)
-
-#undef EXTERNAL_ARRAY_PRINTER
 
 
 template <class Traits>
@@ -312,19 +389,6 @@ void JSObject::PrintElements(std::ostream& os) {  // NOLINT
     break;                                 \
   }
 
-    PRINT_ELEMENTS(EXTERNAL_UINT8_CLAMPED_ELEMENTS, ExternalUint8ClampedArray)
-    PRINT_ELEMENTS(EXTERNAL_INT8_ELEMENTS, ExternalInt8Array)
-    PRINT_ELEMENTS(EXTERNAL_UINT8_ELEMENTS,
-        ExternalUint8Array)
-    PRINT_ELEMENTS(EXTERNAL_INT16_ELEMENTS, ExternalInt16Array)
-    PRINT_ELEMENTS(EXTERNAL_UINT16_ELEMENTS,
-        ExternalUint16Array)
-    PRINT_ELEMENTS(EXTERNAL_INT32_ELEMENTS, ExternalInt32Array)
-    PRINT_ELEMENTS(EXTERNAL_UINT32_ELEMENTS,
-        ExternalUint32Array)
-    PRINT_ELEMENTS(EXTERNAL_FLOAT32_ELEMENTS, ExternalFloat32Array)
-    PRINT_ELEMENTS(EXTERNAL_FLOAT64_ELEMENTS, ExternalFloat64Array)
-
     PRINT_ELEMENTS(UINT8_ELEMENTS, FixedUint8Array)
     PRINT_ELEMENTS(UINT8_CLAMPED_ELEMENTS, FixedUint8ClampedArray)
     PRINT_ELEMENTS(INT8_ELEMENTS, FixedInt8Array)
@@ -340,7 +404,8 @@ void JSObject::PrintElements(std::ostream& os) {  // NOLINT
     case DICTIONARY_ELEMENTS:
       elements()->Print(os);
       break;
-    case SLOPPY_ARGUMENTS_ELEMENTS: {
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS: {
       FixedArray* p = FixedArray::cast(elements());
       os << "   parameter map:";
       for (int i = 2; i < p->length(); i++) {
@@ -402,7 +467,6 @@ void Symbol::SymbolPrint(std::ostream& os) {  // NOLINT
     os << " (" << PrivateSymbolToName() << ")";
   }
   os << "\n - private: " << is_private();
-  os << "\n - own: " << is_own();
   os << "\n";
 }
 
@@ -412,18 +476,11 @@ void Map::MapPrint(std::ostream& os) {  // NOLINT
   os << " - type: " << TypeToString(instance_type()) << "\n";
   os << " - instance size: " << instance_size() << "\n";
   os << " - inobject properties: " << inobject_properties() << "\n";
-  os << " - elements kind: " << ElementsKindToString(elements_kind());
-  os << "\n - pre-allocated property fields: "
-     << pre_allocated_property_fields() << "\n";
+  os << " - elements kind: " << ElementsKindToString(elements_kind()) << "\n";
   os << " - unused property fields: " << unused_property_fields() << "\n";
   if (is_deprecated()) os << " - deprecated_map\n";
+  if (is_stable()) os << " - stable_map\n";
   if (is_dictionary_map()) os << " - dictionary_map\n";
-  if (is_prototype_map()) {
-    os << " - prototype_map\n";
-    os << " - prototype info: " << Brief(prototype_info());
-  } else {
-    os << " - back pointer: " << Brief(GetBackPointer());
-  }
   if (is_hidden_prototype()) os << " - hidden_prototype\n";
   if (has_named_interceptor()) os << " - named_interceptor\n";
   if (has_indexed_interceptor()) os << " - indexed_interceptor\n";
@@ -432,6 +489,12 @@ void Map::MapPrint(std::ostream& os) {  // NOLINT
   if (is_access_check_needed()) os << " - access_check_needed\n";
   if (!is_extensible()) os << " - non-extensible\n";
   if (is_observed()) os << " - observed\n";
+  if (is_prototype_map()) {
+    os << " - prototype_map\n";
+    os << " - prototype info: " << Brief(prototype_info());
+  } else {
+    os << " - back pointer: " << Brief(GetBackPointer());
+  }
   os << "\n - instance descriptors " << (owns_descriptors() ? "(own) " : "")
      << "#" << NumberOfOwnDescriptors() << ": "
      << Brief(instance_descriptors());
@@ -498,6 +561,61 @@ void FixedDoubleArray::FixedDoubleArrayPrint(std::ostream& os) {  // NOLINT
       os << "<the hole>";
     } else {
       os << get_scalar(i);
+    }
+  }
+  os << "\n";
+}
+
+
+void TypeFeedbackVector::Print() {
+  OFStream os(stdout);
+  TypeFeedbackVectorPrint(os);
+  os << std::flush;
+}
+
+
+void TypeFeedbackVector::TypeFeedbackVectorPrint(std::ostream& os) {  // NOLINT
+  HeapObject::PrintHeader(os, "TypeFeedbackVector");
+  os << " - length: " << length();
+  if (length() == 0) {
+    os << " (empty)\n";
+    return;
+  }
+
+  os << "\n - ics with type info: " << ic_with_type_info_count();
+  os << "\n - generic ics: " << ic_generic_count();
+
+  if (Slots() > 0) {
+    for (int i = 0; i < Slots(); i++) {
+      FeedbackVectorSlot slot(i);
+      os << "\n Slot " << i << " [" << GetIndex(slot)
+         << "]: " << Brief(Get(slot));
+    }
+  }
+
+  if (ICSlots() > 0) {
+    DCHECK(elements_per_ic_slot() == 2);
+
+    for (int i = 0; i < ICSlots(); i++) {
+      FeedbackVectorICSlot slot(i);
+      Code::Kind kind = GetKind(slot);
+      os << "\n ICSlot " << i;
+      if (kind == Code::LOAD_IC) {
+        LoadICNexus nexus(this, slot);
+        os << " LOAD_IC " << Code::ICState2String(nexus.StateFromFeedback());
+      } else if (kind == Code::KEYED_LOAD_IC) {
+        KeyedLoadICNexus nexus(this, slot);
+        os << " KEYED_LOAD_IC "
+           << Code::ICState2String(nexus.StateFromFeedback());
+      } else {
+        DCHECK(kind == Code::CALL_IC);
+        CallICNexus nexus(this, slot);
+        os << " CALL_IC " << Code::ICState2String(nexus.StateFromFeedback());
+      }
+
+      os << "\n  [" << GetIndex(slot) << "]: " << Brief(Get(slot));
+      os << "\n  [" << (GetIndex(slot) + 1)
+         << "]: " << Brief(get(GetIndex(slot) + 1));
     }
   }
   os << "\n";
@@ -747,10 +865,8 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {  // NOLINT
     String* source = String::cast(Script::cast(script())->source());
     int start = start_position();
     int length = end_position() - start;
-    SmartArrayPointer<char> source_string =
-        source->ToCString(DISALLOW_NULLS,
-                          FAST_STRING_TRAVERSAL,
-                          start, length, NULL);
+    base::SmartArrayPointer<char> source_string = source->ToCString(
+        DISALLOW_NULLS, FAST_STRING_TRAVERSAL, start, length, NULL);
     os << source_string.get();
   }
   // Script files are often large, hard to read.
@@ -764,7 +880,10 @@ void SharedFunctionInfo::SharedFunctionInfoPrint(std::ostream& os) {  // NOLINT
   os << "\n - length = " << length();
   os << "\n - optimized_code_map = " << Brief(optimized_code_map());
   os << "\n - feedback_vector = ";
-  feedback_vector()->FixedArrayPrint(os);
+  feedback_vector()->TypeFeedbackVectorPrint(os);
+  if (HasBytecodeArray()) {
+    os << "\n - bytecode_array = " << bytecode_array();
+  }
   os << "\n";
 }
 
@@ -983,6 +1102,7 @@ void Script::ScriptPrint(std::ostream& os) {  // NOLINT
   os << "\n - eval from shared: " << Brief(eval_from_shared());
   os << "\n - eval from instructions offset: "
      << Brief(eval_from_instructions_offset());
+  os << "\n - shared function infos: " << Brief(shared_function_infos());
   os << "\n";
 }
 
@@ -990,7 +1110,6 @@ void Script::ScriptPrint(std::ostream& os) {  // NOLINT
 void DebugInfo::DebugInfoPrint(std::ostream& os) {  // NOLINT
   HeapObject::PrintHeader(os, "DebugInfo");
   os << "\n - shared: " << Brief(shared());
-  os << "\n - original_code: " << Brief(original_code());
   os << "\n - code: " << Brief(code());
   os << "\n - break_points: ";
   break_points()->Print(os);

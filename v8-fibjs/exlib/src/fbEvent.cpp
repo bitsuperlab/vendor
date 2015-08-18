@@ -7,46 +7,68 @@
  */
 
 #include "service.h"
+#include <assert.h>
 
 namespace exlib
 {
 void Event::wait()
 {
-    if (!m_set)
-    {
-        Service *pService = Service::getFiberService();
+	m_lock.lock();
+	if (!m_set)
+	{
+		Thread_base* current = Thread_base::current();
+		assert(current != 0);
 
-        if (pService)
-        {
-            m_blocks.put(pService->m_running);
-            pService->switchtonext();
-        }
-    }
+		m_blocks.putTail(current);
+		m_lock.unlock();
+
+		current->suspend();
+	}
+	else
+		m_lock.unlock();
 }
 
 void Event::pulse()
 {
-    Service *pService = Service::getFiberService();
+	List<Thread_base> blocks;
 
-    if (pService)
-        while (!m_blocks.empty())
-            pService->m_resume.put(m_blocks.get());
+	m_lock.lock();
+	m_blocks.getList(blocks);
+	m_lock.unlock();
+
+	Thread_base* fb;
+	while ((fb = blocks.getHead()) != 0)
+		fb->resume();
 }
 
 void Event::set()
 {
-    m_set = true;
-    pulse();
+	List<Thread_base> blocks;
+
+	m_lock.lock();
+	m_set = true;
+	m_blocks.getList(blocks);
+	m_lock.unlock();
+
+	Thread_base* fb;
+	while ((fb = blocks.getHead()) != 0)
+		fb->resume();
 }
 
 void Event::reset()
 {
-    m_set = false;
+	m_lock.lock();
+	m_set = false;
+	m_lock.unlock();
 }
 
 bool Event::isSet()
 {
-    return m_set;
+	m_lock.lock();
+	bool r = m_set;
+	m_lock.unlock();
+
+	return r;
 }
 
 }

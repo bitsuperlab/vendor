@@ -11,6 +11,7 @@
 #include "src/bootstrapper.h"
 #include "src/builtins.h"
 #include "src/cpu-profiler.h"
+#include "src/elements.h"
 #include "src/gdb-jit.h"
 #include "src/heap/mark-compact.h"
 #include "src/heap-profiler.h"
@@ -184,38 +185,34 @@ static void MoveDoubleElements(FixedDoubleArray* dst, int dst_index,
 }
 
 
-static bool ArrayPrototypeHasNoElements(Heap* heap, PrototypeIterator* iter) {
+static bool ArrayPrototypeHasNoElements(PrototypeIterator* iter) {
   DisallowHeapAllocation no_gc;
   for (; !iter->IsAtEnd(); iter->Advance()) {
     if (iter->GetCurrent()->IsJSProxy()) return false;
-    if (JSObject::cast(iter->GetCurrent())->elements() !=
-        heap->empty_fixed_array()) {
-      return false;
-    }
+    JSObject* current = JSObject::cast(iter->GetCurrent());
+    if (current->IsAccessCheckNeeded()) return false;
+    if (current->HasIndexedInterceptor()) return false;
+    if (current->elements()->length() != 0) return false;
   }
   return true;
 }
 
 
-static inline bool IsJSArrayFastElementMovingAllowed(Heap* heap,
+static inline bool IsJSArrayFastElementMovingAllowed(Isolate* isolate,
                                                      JSArray* receiver) {
   DisallowHeapAllocation no_gc;
-  Isolate* isolate = heap->isolate();
-  if (!isolate->IsFastArrayConstructorPrototypeChainIntact()) {
-    return false;
-  }
-
   // If the array prototype chain is intact (and free of elements), and if the
   // receiver's prototype is the array prototype, then we are done.
   Object* prototype = receiver->map()->prototype();
   if (prototype->IsJSArray() &&
-      isolate->is_initial_array_prototype(JSArray::cast(prototype))) {
+      isolate->is_initial_array_prototype(JSArray::cast(prototype)) &&
+      isolate->IsFastArrayConstructorPrototypeChainIntact()) {
     return true;
   }
 
   // Slow case.
   PrototypeIterator iter(isolate, receiver);
-  return ArrayPrototypeHasNoElements(heap, &iter);
+  return ArrayPrototypeHasNoElements(&iter);
 }
 
 
@@ -231,7 +228,7 @@ static inline MaybeHandle<FixedArrayBase> EnsureJSArrayWithWritableFastElements(
   // If there may be elements accessors in the prototype chain, the fast path
   // cannot be used if there arguments to add to the array.
   Heap* heap = isolate->heap();
-  if (args != NULL && !IsJSArrayFastElementMovingAllowed(heap, *array)) {
+  if (args != NULL && !IsJSArrayFastElementMovingAllowed(isolate, *array)) {
     return MaybeHandle<FixedArrayBase>();
   }
   if (array->map()->is_observed()) return MaybeHandle<FixedArrayBase>();
@@ -265,7 +262,7 @@ static inline MaybeHandle<FixedArrayBase> EnsureJSArrayWithWritableFastElements(
   ElementsKind target_kind = origin_kind;
   {
     DisallowHeapAllocation no_gc;
-    int arg_count = args->length() - first_added_arg;
+    int arg_count = args_length - first_added_arg;
     Object** arguments = args->arguments() - first_added_arg - (arg_count - 1);
     for (int i = 0; i < arg_count; i++) {
       Object* arg = arguments[i];
@@ -324,104 +321,22 @@ BUILTIN(ArrayPush) {
   if (!maybe_elms_obj.ToHandle(&elms_obj)) {
     return CallJsBuiltin(isolate, "$arrayPush", args);
   }
-
+  // Fast Elements Path
+  int push_size = args.length() - 1;
   Handle<JSArray> array = Handle<JSArray>::cast(receiver);
   int len = Smi::cast(array->length())->value();
-  int to_add = args.length() - 1;
-  if (to_add > 0 && JSArray::WouldChangeReadOnlyLength(array, len + to_add)) {
+  if (push_size == 0) {
+    return Smi::FromInt(len);
+  }
+  if (push_size > 0 &&
+      JSArray::WouldChangeReadOnlyLength(array, len + push_size)) {
     return CallJsBuiltin(isolate, "$arrayPush", args);
   }
   DCHECK(!array->map()->is_observed());
-
-  ElementsKind kind = array->GetElementsKind();
-
-  if (IsFastSmiOrObjectElementsKind(kind)) {
-    Handle<FixedArray> elms = Handle<FixedArray>::cast(elms_obj);
-    if (to_add == 0) {
-      return Smi::FromInt(len);
-    }
-    // Currently fixed arrays cannot grow too big, so
-    // we should never hit this case.
-    DCHECK(to_add <= (Smi::kMaxValue - len));
-
-    int new_length = len + to_add;
-
-    if (new_length > elms->length()) {
-      // New backing storage is needed.
-      int capacity = new_length + (new_length >> 1) + 16;
-      Handle<FixedArray> new_elms =
-          isolate->factory()->NewUninitializedFixedArray(capacity);
-
-      ElementsAccessor* accessor = array->GetElementsAccessor();
-      accessor->CopyElements(
-          elms_obj, 0, kind, new_elms, 0,
-          ElementsAccessor::kCopyToEndAndInitializeToHole);
-
-      elms = new_elms;
-    }
-
-    // Add the provided values.
-    DisallowHeapAllocation no_gc;
-    WriteBarrierMode mode = elms->GetWriteBarrierMode(no_gc);
-    for (int index = 0; index < to_add; index++) {
-      elms->set(index + len, args[index + 1], mode);
-    }
-
-    if (*elms != array->elements()) {
-      array->set_elements(*elms);
-    }
-
-    // Set the length.
-    array->set_length(Smi::FromInt(new_length));
-    return Smi::FromInt(new_length);
-  } else {
-    int elms_len = elms_obj->length();
-    if (to_add == 0) {
-      return Smi::FromInt(len);
-    }
-    // Currently fixed arrays cannot grow too big, so
-    // we should never hit this case.
-    DCHECK(to_add <= (Smi::kMaxValue - len));
-
-    int new_length = len + to_add;
-
-    Handle<FixedDoubleArray> new_elms;
-
-    if (new_length > elms_len) {
-      // New backing storage is needed.
-      int capacity = new_length + (new_length >> 1) + 16;
-      // Create new backing store; since capacity > 0, we can
-      // safely cast to FixedDoubleArray.
-      new_elms = Handle<FixedDoubleArray>::cast(
-          isolate->factory()->NewFixedDoubleArray(capacity));
-
-      ElementsAccessor* accessor = array->GetElementsAccessor();
-      accessor->CopyElements(
-          elms_obj, 0, kind, new_elms, 0,
-          ElementsAccessor::kCopyToEndAndInitializeToHole);
-
-    } else {
-      // to_add is > 0 and new_length <= elms_len, so elms_obj cannot be the
-      // empty_fixed_array.
-      new_elms = Handle<FixedDoubleArray>::cast(elms_obj);
-    }
-
-    // Add the provided values.
-    DisallowHeapAllocation no_gc;
-    int index;
-    for (index = 0; index < to_add; index++) {
-      Object* arg = args[index + 1];
-      new_elms->set(index + len, arg->Number());
-    }
-
-    if (*new_elms != array->elements()) {
-      array->set_elements(*new_elms);
-    }
-
-    // Set the length.
-    array->set_length(Smi::FromInt(new_length));
-    return Smi::FromInt(new_length);
-  }
+  ElementsAccessor* accessor = array->GetElementsAccessor();
+  int new_length = accessor->Push(array, elms_obj, &args[1], push_size,
+                                  ElementsAccessor::kDirectionReverse);
+  return Smi::FromInt(new_length);
 }
 
 
@@ -445,15 +360,12 @@ BUILTIN(ArrayPop) {
     return CallJsBuiltin(isolate, "$arrayPop", args);
   }
 
-  ElementsAccessor* accessor = array->GetElementsAccessor();
   uint32_t new_length = len - 1;
   Handle<Object> element;
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, element, Object::GetElement(isolate, array, new_length));
 
-  RETURN_FAILURE_ON_EXCEPTION(
-      isolate,
-      accessor->SetLength(array, handle(Smi::FromInt(new_length), isolate)));
+  JSArray::SetLength(array, new_length);
   return *element;
 }
 
@@ -466,7 +378,7 @@ BUILTIN(ArrayShift) {
       EnsureJSArrayWithWritableFastElements(isolate, receiver, NULL, 0);
   Handle<FixedArrayBase> elms_obj;
   if (!maybe_elms_obj.ToHandle(&elms_obj) ||
-      !IsJSArrayFastElementMovingAllowed(heap, JSArray::cast(*receiver))) {
+      !IsJSArrayFastElementMovingAllowed(isolate, JSArray::cast(*receiver))) {
     return CallJsBuiltin(isolate, "$arrayShift", args);
   }
   Handle<JSArray> array = Handle<JSArray>::cast(receiver);
@@ -509,7 +421,6 @@ BUILTIN(ArrayShift) {
 
 BUILTIN(ArrayUnshift) {
   HandleScope scope(isolate);
-  Heap* heap = isolate->heap();
   Handle<Object> receiver = args.receiver();
   MaybeHandle<FixedArrayBase> maybe_elms_obj =
       EnsureJSArrayWithWritableFastElements(isolate, receiver, &args, 1);
@@ -551,6 +462,7 @@ BUILTIN(ArrayUnshift) {
     array->set_elements(*elms);
   } else {
     DisallowHeapAllocation no_gc;
+    Heap* heap = isolate->heap();
     heap->MoveElements(*elms, to_add, 0, len);
   }
 
@@ -569,7 +481,6 @@ BUILTIN(ArrayUnshift) {
 
 BUILTIN(ArraySlice) {
   HandleScope scope(isolate);
-  Heap* heap = isolate->heap();
   Handle<Object> receiver = args.receiver();
   int len = -1;
   int relative_start = 0;
@@ -578,7 +489,7 @@ BUILTIN(ArraySlice) {
     DisallowHeapAllocation no_gc;
     if (receiver->IsJSArray()) {
       JSArray* array = JSArray::cast(*receiver);
-      if (!IsJSArrayFastElementMovingAllowed(heap, array)) {
+      if (!IsJSArrayFastElementMovingAllowed(isolate, array)) {
         AllowHeapAllocation allow_allocation;
         return CallJsBuiltin(isolate, "$arraySlice", args);
       }
@@ -937,12 +848,11 @@ BUILTIN(ArrayConcat) {
   bool has_double = false;
   {
     DisallowHeapAllocation no_gc;
-    Heap* heap = isolate->heap();
     Context* native_context = isolate->context()->native_context();
     Object* array_proto = native_context->array_function()->prototype();
     PrototypeIterator iter(isolate, array_proto,
                            PrototypeIterator::START_AT_RECEIVER);
-    if (!ArrayPrototypeHasNoElements(heap, &iter)) {
+    if (!ArrayPrototypeHasNoElements(&iter)) {
       AllowHeapAllocation allow_allocation;
       return CallJsBuiltin(isolate, "$arrayConcat", args);
     }
@@ -1097,7 +1007,7 @@ MUST_USE_RESULT static MaybeHandle<Object> HandleApiCallHelper(
                                      args.length() - 1,
                                      is_construct);
 
-    v8::Handle<v8::Value> value = custom.Call(callback);
+    v8::Local<v8::Value> value = custom.Call(callback);
     Handle<Object> result;
     if (value.IsEmpty()) {
       result = isolate->factory()->undefined_value();
@@ -1234,7 +1144,7 @@ MUST_USE_RESULT static Object* HandleApiCallAsFunctionOrConstructor(
                                      &args[0] - 1,
                                      args.length() - 1,
                                      is_construct_call);
-    v8::Handle<v8::Value> value = custom.Call(callback);
+    v8::Local<v8::Value> value = custom.Call(callback);
     if (value.IsEmpty()) {
       result = heap->undefined_value();
     } else {
@@ -1268,7 +1178,12 @@ static void Generate_LoadIC_Miss(MacroAssembler* masm) {
 
 
 static void Generate_LoadIC_Normal(MacroAssembler* masm) {
-  LoadIC::GenerateNormal(masm);
+  LoadIC::GenerateNormal(masm, SLOPPY);
+}
+
+
+static void Generate_LoadIC_Normal_Strong(MacroAssembler* masm) {
+  LoadIC::GenerateNormal(masm, STRONG);
 }
 
 
@@ -1278,17 +1193,22 @@ static void Generate_LoadIC_Getter_ForDeopt(MacroAssembler* masm) {
 
 
 static void Generate_LoadIC_Slow(MacroAssembler* masm) {
-  LoadIC::GenerateRuntimeGetProperty(masm);
+  LoadIC::GenerateRuntimeGetProperty(masm, SLOPPY);
 }
 
 
-static void Generate_KeyedLoadIC_Initialize(MacroAssembler* masm) {
-  KeyedLoadIC::GenerateInitialize(masm);
+static void Generate_LoadIC_Slow_Strong(MacroAssembler* masm) {
+  LoadIC::GenerateRuntimeGetProperty(masm, STRONG);
 }
 
 
 static void Generate_KeyedLoadIC_Slow(MacroAssembler* masm) {
-  KeyedLoadIC::GenerateRuntimeGetProperty(masm);
+  KeyedLoadIC::GenerateRuntimeGetProperty(masm, SLOPPY);
+}
+
+
+static void Generate_KeyedLoadIC_Slow_Strong(MacroAssembler* masm) {
+  KeyedLoadIC::GenerateRuntimeGetProperty(masm, STRONG);
 }
 
 
@@ -1298,7 +1218,12 @@ static void Generate_KeyedLoadIC_Miss(MacroAssembler* masm) {
 
 
 static void Generate_KeyedLoadIC_Megamorphic(MacroAssembler* masm) {
-  KeyedLoadIC::GenerateMegamorphic(masm);
+  KeyedLoadIC::GenerateMegamorphic(masm, SLOPPY);
+}
+
+
+static void Generate_KeyedLoadIC_Megamorphic_Strong(MacroAssembler* masm) {
+  KeyedLoadIC::GenerateMegamorphic(masm, STRONG);
 }
 
 
@@ -1362,59 +1287,15 @@ static void Generate_KeyedStoreIC_PreMonomorphic_Strict(MacroAssembler* masm) {
 }
 
 
-static void Generate_CallICStub_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateCallICStubDebugBreak(masm);
-}
-
-
-static void Generate_LoadIC_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateLoadICDebugBreak(masm);
-}
-
-
-static void Generate_StoreIC_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateStoreICDebugBreak(masm);
-}
-
-
-static void Generate_KeyedLoadIC_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateKeyedLoadICDebugBreak(masm);
-}
-
-
-static void Generate_KeyedStoreIC_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateKeyedStoreICDebugBreak(masm);
-}
-
-
-static void Generate_CompareNilIC_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateCompareNilICDebugBreak(masm);
-}
-
-
 static void Generate_Return_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateReturnDebugBreak(masm);
-}
-
-
-static void Generate_CallFunctionStub_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateCallFunctionStubDebugBreak(masm);
-}
-
-
-static void Generate_CallConstructStub_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateCallConstructStubDebugBreak(masm);
-}
-
-
-static void Generate_CallConstructStub_Recording_DebugBreak(
-    MacroAssembler* masm) {
-  DebugCodegen::GenerateCallConstructStubRecordDebugBreak(masm);
+  DebugCodegen::GenerateDebugBreakStub(masm,
+                                       DebugCodegen::SAVE_RESULT_REGISTER);
 }
 
 
 static void Generate_Slot_DebugBreak(MacroAssembler* masm) {
-  DebugCodegen::GenerateSlotDebugBreak(masm);
+  DebugCodegen::GenerateDebugBreakStub(masm,
+                                       DebugCodegen::IGNORE_RESULT_REGISTER);
 }
 
 

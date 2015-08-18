@@ -10,7 +10,6 @@
 #define _ex_utils_h__
 
 #include <stdint.h>
-#include <assert.h>
 #include "osconfig.h"
 
 #ifdef WIN32
@@ -33,7 +32,7 @@ public:
 	{
 	}
 
-	atomic(int32_t new_value) : m_v(new_value)
+	atomic(intptr_t new_value) : m_v(new_value)
 	{
 	}
 
@@ -42,57 +41,57 @@ public:
 	}
 
 public:
-	int32_t operator=(int32_t new_value)
+	intptr_t operator=(intptr_t new_value)
 	{
 		xchg(new_value);
 		return new_value;
 	}
 
-	int32_t operator=(const atomic &new_value)
+	intptr_t operator=(const atomic &new_value)
 	{
-		int32_t v = new_value.m_v;
+		intptr_t v = new_value.m_v;
 
 		xchg(v);
 		return v;
 	}
 
-	operator int32_t () const
+	operator intptr_t () const
 	{
 		return m_v;
 	}
 
-	int32_t value() const
+	intptr_t value() const
 	{
 		return m_v;
 	}
 
-	int32_t CompareAndSwap(int32_t old_value, int32_t new_value)
+	intptr_t CompareAndSwap(intptr_t old_value, intptr_t new_value)
 	{
 		return exlib::CompareAndSwap(&m_v, old_value, new_value);
 	}
 
-	inline int32_t add(int32_t incr)
+	inline intptr_t add(intptr_t incr)
 	{
 		return atom_add(&m_v, incr);
 	}
 
-	inline int32_t xchg(int32_t new_value)
+	inline intptr_t xchg(intptr_t new_value)
 	{
 		return atom_xchg(&m_v, new_value);
 	}
 
-	inline int32_t inc()
+	inline intptr_t inc()
 	{
 		return add(1);
 	}
 
-	inline int32_t dec()
+	inline intptr_t dec()
 	{
 		return add(-1);
 	}
 
 private:
-	volatile int32_t m_v;
+	volatile intptr_t m_v;
 };
 
 template<class T>
@@ -150,6 +149,28 @@ private:
 	T *volatile m_v;
 };
 
+class spinlock
+{
+public:
+	void lock()
+	{
+		while (m_atom.CompareAndSwap(0, -1));
+	}
+
+	void unlock()
+	{
+		m_atom.xchg(0);
+	}
+
+private:
+	atomic m_atom;
+};
+
 }
+
+#ifndef ARRAYSIZE
+#define ARRAYSIZE(a) \
+    ((sizeof(a) / sizeof(*(a))) / static_cast<size_t>(!(sizeof(a) % sizeof(*(a)))))
+#endif
 
 #endif

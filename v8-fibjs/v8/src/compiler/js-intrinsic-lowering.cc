@@ -46,6 +46,8 @@ Reduction JSIntrinsicLowering::Reduce(Node* node) {
       return ReduceIncrementStatsCounter(node);
     case Runtime::kInlineIsArray:
       return ReduceIsInstanceType(node, JS_ARRAY_TYPE);
+    case Runtime::kInlineIsDate:
+      return ReduceIsInstanceType(node, JS_DATE_TYPE);
     case Runtime::kInlineIsTypedArray:
       return ReduceIsInstanceType(node, JS_TYPED_ARRAY_TYPE);
     case Runtime::kInlineIsFunction:
@@ -84,12 +86,20 @@ Reduction JSIntrinsicLowering::Reduce(Node* node) {
       return ReduceValueOf(node);
     case Runtime::kInlineIsMinusZero:
       return ReduceIsMinusZero(node);
+    case Runtime::kInlineFixedArrayGet:
+      return ReduceFixedArrayGet(node);
     case Runtime::kInlineFixedArraySet:
       return ReduceFixedArraySet(node);
     case Runtime::kInlineGetTypeFeedbackVector:
       return ReduceGetTypeFeedbackVector(node);
     case Runtime::kInlineGetCallerJSFunction:
       return ReduceGetCallerJSFunction(node);
+    case Runtime::kInlineToObject:
+      return ReduceToObject(node);
+    case Runtime::kInlineThrowNotDateError:
+      return ReduceThrowNotDateError(node);
+    case Runtime::kInlineCallFunction:
+      return ReduceCallFunction(node);
     default:
       break;
   }
@@ -130,31 +140,18 @@ Reduction JSIntrinsicLowering::ReduceDateField(Node* node) {
 
 Reduction JSIntrinsicLowering::ReduceDeoptimizeNow(Node* node) {
   if (mode() != kDeoptimizationEnabled) return NoChange();
-  Node* frame_state = NodeProperties::GetFrameStateInput(node, 0);
-  DCHECK_EQ(frame_state->opcode(), IrOpcode::kFrameState);
+  Node* const frame_state = NodeProperties::GetFrameStateInput(node, 0);
+  Node* const effect = NodeProperties::GetEffectInput(node);
+  Node* const control = NodeProperties::GetControlInput(node);
 
-  Node* effect = NodeProperties::GetEffectInput(node);
-  Node* control = NodeProperties::GetControlInput(node);
+  // TODO(bmeurer): Move MergeControlToEnd() to the AdvancedReducer.
+  Node* deoptimize =
+      graph()->NewNode(common()->Deoptimize(), frame_state, effect, control);
+  NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
 
-  // We are making the continuation after the call dead. To
-  // model this, we generate if (true) statement with deopt
-  // in the true branch and continuation in the false branch.
-  Node* branch =
-      graph()->NewNode(common()->Branch(), jsgraph()->TrueConstant(), control);
-
-  // False branch - the original continuation.
-  Node* if_false = graph()->NewNode(common()->IfFalse(), branch);
-  ReplaceWithValue(node, jsgraph()->UndefinedConstant(), effect, if_false);
-
-  // True branch: deopt.
-  Node* if_true = graph()->NewNode(common()->IfTrue(), branch);
-  Node* deopt =
-      graph()->NewNode(common()->Deoptimize(), frame_state, effect, if_true);
-
-  // Connect the deopt to the merge exiting the graph.
-  NodeProperties::MergeControlToEnd(graph(), common(), deopt);
-
-  return Changed(deopt);
+  node->set_op(common()->Dead());
+  node->TrimInputCount(0);
+  return Changed(node);
 }
 
 
@@ -179,11 +176,12 @@ Reduction JSIntrinsicLowering::ReduceHeapObjectGetMap(Node* node) {
 
 Reduction JSIntrinsicLowering::ReduceIncrementStatsCounter(Node* node) {
   if (!FLAG_native_code_counters) return ChangeToUndefined(node);
-  HeapObjectMatcher<String> m(NodeProperties::GetValueInput(node, 0));
+  HeapObjectMatcher m(NodeProperties::GetValueInput(node, 0));
   if (!m.HasValue() || !m.Value().handle()->IsString()) {
     return ChangeToUndefined(node);
   }
-  SmartArrayPointer<char> name = m.Value().handle()->ToCString();
+  base::SmartArrayPointer<char> name =
+      Handle<String>::cast(m.Value().handle())->ToCString();
   StatsCounter counter(jsgraph()->isolate(), name.get());
   if (!counter.Enabled()) return ChangeToUndefined(node);
 
@@ -276,8 +274,8 @@ Reduction JSIntrinsicLowering::ReduceMathClz32(Node* node) {
 
 
 Reduction JSIntrinsicLowering::ReduceMathFloor(Node* node) {
-  if (!machine()->HasFloat64RoundDown()) return NoChange();
-  return Change(node, machine()->Float64RoundDown());
+  if (!machine()->Float64RoundDown().IsSupported()) return NoChange();
+  return Change(node, machine()->Float64RoundDown().op());
 }
 
 
@@ -453,6 +451,17 @@ Reduction JSIntrinsicLowering::ReduceIsMinusZero(Node* node) {
 }
 
 
+Reduction JSIntrinsicLowering::ReduceFixedArrayGet(Node* node) {
+  Node* base = node->InputAt(0);
+  Node* index = node->InputAt(1);
+  Node* effect = NodeProperties::GetEffectInput(node);
+  Node* control = NodeProperties::GetControlInput(node);
+  return Change(
+      node, simplified()->LoadElement(AccessBuilder::ForFixedArrayElement()),
+      base, index, effect, control);
+}
+
+
 Reduction JSIntrinsicLowering::ReduceFixedArraySet(Node* node) {
   Node* base = node->InputAt(0);
   Node* index = node->InputAt(1);
@@ -504,6 +513,44 @@ Reduction JSIntrinsicLowering::ReduceGetCallerJSFunction(Node* node) {
 }
 
 
+Reduction JSIntrinsicLowering::ReduceThrowNotDateError(Node* node) {
+  if (mode() != kDeoptimizationEnabled) return NoChange();
+  Node* const frame_state = NodeProperties::GetFrameStateInput(node, 1);
+  Node* const effect = NodeProperties::GetEffectInput(node);
+  Node* const control = NodeProperties::GetControlInput(node);
+
+  // TODO(bmeurer): Move MergeControlToEnd() to the AdvancedReducer.
+  Node* deoptimize =
+      graph()->NewNode(common()->Deoptimize(), frame_state, effect, control);
+  NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
+
+  node->set_op(common()->Dead());
+  node->TrimInputCount(0);
+  return Changed(node);
+}
+
+
+Reduction JSIntrinsicLowering::ReduceToObject(Node* node) {
+  node->set_op(javascript()->ToObject());
+  return Changed(node);
+}
+
+
+Reduction JSIntrinsicLowering::ReduceCallFunction(Node* node) {
+  CallRuntimeParameters params = OpParameter<CallRuntimeParameters>(node->op());
+  size_t arity = params.arity();
+  node->set_op(javascript()->CallFunction(arity, NO_CALL_FUNCTION_FLAGS, STRICT,
+                                          VectorSlotPair(), ALLOW_TAIL_CALLS));
+  Node* function = node->InputAt(static_cast<int>(arity - 1));
+  while (--arity != 0) {
+    node->ReplaceInput(static_cast<int>(arity),
+                       node->InputAt(static_cast<int>(arity - 1)));
+  }
+  node->ReplaceInput(0, function);
+  return Changed(node);
+}
+
+
 Reduction JSIntrinsicLowering::Change(Node* node, const Operator* op, Node* a,
                                       Node* b) {
   node->set_op(op);
@@ -527,6 +574,19 @@ Reduction JSIntrinsicLowering::Change(Node* node, const Operator* op, Node* a,
 }
 
 
+Reduction JSIntrinsicLowering::Change(Node* node, const Operator* op, Node* a,
+                                      Node* b, Node* c, Node* d) {
+  node->set_op(op);
+  node->ReplaceInput(0, a);
+  node->ReplaceInput(1, b);
+  node->ReplaceInput(2, c);
+  node->ReplaceInput(3, d);
+  node->TrimInputCount(4);
+  RelaxControls(node);
+  return Changed(node);
+}
+
+
 Reduction JSIntrinsicLowering::ChangeToUndefined(Node* node, Node* effect) {
   ReplaceWithValue(node, jsgraph()->UndefinedConstant(), effect);
   return Changed(node);
@@ -538,6 +598,10 @@ Graph* JSIntrinsicLowering::graph() const { return jsgraph()->graph(); }
 
 CommonOperatorBuilder* JSIntrinsicLowering::common() const {
   return jsgraph()->common();
+}
+
+JSOperatorBuilder* JSIntrinsicLowering::javascript() const {
+  return jsgraph_->javascript();
 }
 
 

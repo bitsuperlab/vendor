@@ -24,7 +24,6 @@ const char* Variable::Mode2String(VariableMode mode) {
     case DYNAMIC: return "DYNAMIC";
     case DYNAMIC_GLOBAL: return "DYNAMIC_GLOBAL";
     case DYNAMIC_LOCAL: return "DYNAMIC_LOCAL";
-    case INTERNAL: return "INTERNAL";
     case TEMPORARY: return "TEMPORARY";
   }
   UNREACHABLE();
@@ -39,7 +38,7 @@ Variable::Variable(Scope* scope, const AstRawString* name, VariableMode mode,
       name_(name),
       mode_(mode),
       kind_(kind),
-      location_(UNALLOCATED),
+      location_(VariableLocation::UNALLOCATED),
       index_(-1),
       initializer_position_(RelocInfo::kNoPosition),
       has_strong_mode_reference_(false),
@@ -60,6 +59,14 @@ bool Variable::IsGlobalObjectProperty() const {
   // activation frame.
   return (IsDynamicVariableMode(mode_) ||
           (IsDeclaredVariableMode(mode_) && !IsLexicalVariableMode(mode_))) &&
+         scope_ != NULL && scope_->is_script_scope() && !is_this();
+}
+
+
+bool Variable::IsStaticGlobalObjectProperty() const {
+  // Temporaries are never global, they must always be allocated in the
+  // activation frame.
+  return (IsDeclaredVariableMode(mode_) && !IsLexicalVariableMode(mode_)) &&
          scope_ != NULL && scope_->is_script_scope() && !is_this();
 }
 

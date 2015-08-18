@@ -17,7 +17,7 @@
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
 #include "src/cpu-profiler.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -1438,10 +1438,11 @@ void MacroAssembler::IsObjectNameType(Register object,
 
 void MacroAssembler::DebugBreak() {
   mov(r0, Operand::Zero());
-  mov(r1, Operand(ExternalReference(Runtime::kDebugBreak, isolate())));
+  mov(r1,
+      Operand(ExternalReference(Runtime::kHandleDebuggerStatement, isolate())));
   CEntryStub ces(isolate(), 1);
   DCHECK(AllowThisStubCall(&ces));
-  Call(ces.GetCode(), RelocInfo::DEBUG_BREAK);
+  Call(ces.GetCode(), RelocInfo::DEBUGGER_STATEMENT);
 }
 
 
@@ -1876,26 +1877,6 @@ void MacroAssembler::Allocate(Register object_size,
   if ((flags & TAG_OBJECT) != 0) {
     add(result, result, Operand(kHeapObjectTag));
   }
-}
-
-
-void MacroAssembler::UndoAllocationInNewSpace(Register object,
-                                              Register scratch) {
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
-
-  // Make sure the object has no tag before resetting top.
-  and_(object, object, Operand(~kHeapObjectTagMask));
-#ifdef DEBUG
-  // Check that the object un-allocated is below the current top.
-  mov(scratch, Operand(new_space_allocation_top));
-  ldr(scratch, MemOperand(scratch));
-  cmp(object, scratch);
-  Check(lt, kUndoAllocationOfNonAllocatedMemory);
-#endif
-  // Write the address of the object to un-allocate as the current top.
-  mov(scratch, Operand(new_space_allocation_top));
-  str(object, MemOperand(scratch));
 }
 
 
@@ -3178,7 +3159,7 @@ void MacroAssembler::InitializeFieldsWithFiller(Register start_offset,
   str(filler, MemOperand(start_offset, kPointerSize, PostIndex));
   bind(&entry);
   cmp(start_offset, end_offset);
-  b(lt, &loop);
+  b(lo, &loop);
 }
 
 
@@ -3406,7 +3387,7 @@ void MacroAssembler::CallCFunctionHelper(Register function,
   if (ActivationFrameAlignment() > kPointerSize) {
     ldr(sp, MemOperand(sp, stack_passed_arguments * kPointerSize));
   } else {
-    add(sp, sp, Operand(stack_passed_arguments * sizeof(kPointerSize)));
+    add(sp, sp, Operand(stack_passed_arguments * kPointerSize));
   }
 }
 
@@ -3813,23 +3794,35 @@ void MacroAssembler::JumpIfDictionaryInPrototypeChain(
     Register scratch1,
     Label* found) {
   DCHECK(!scratch1.is(scratch0));
-  Factory* factory = isolate()->factory();
   Register current = scratch0;
-  Label loop_again;
+  Label loop_again, end;
 
   // scratch contained elements pointer.
   mov(current, object);
+  ldr(current, FieldMemOperand(current, HeapObject::kMapOffset));
+  ldr(current, FieldMemOperand(current, Map::kPrototypeOffset));
+  CompareRoot(current, Heap::kNullValueRootIndex);
+  b(eq, &end);
 
   // Loop based on the map going up the prototype chain.
   bind(&loop_again);
   ldr(current, FieldMemOperand(current, HeapObject::kMapOffset));
+
+  STATIC_ASSERT(JS_PROXY_TYPE < JS_OBJECT_TYPE);
+  STATIC_ASSERT(JS_VALUE_TYPE < JS_OBJECT_TYPE);
+  ldrb(scratch1, FieldMemOperand(current, Map::kInstanceTypeOffset));
+  cmp(scratch1, Operand(JS_OBJECT_TYPE));
+  b(lo, found);
+
   ldr(scratch1, FieldMemOperand(current, Map::kBitField2Offset));
   DecodeField<Map::ElementsKindBits>(scratch1);
   cmp(scratch1, Operand(DICTIONARY_ELEMENTS));
   b(eq, found);
   ldr(current, FieldMemOperand(current, Map::kPrototypeOffset));
-  cmp(current, Operand(factory->null_value()));
+  CompareRoot(current, Heap::kNullValueRootIndex);
   b(ne, &loop_again);
+
+  bind(&end);
 }
 
 

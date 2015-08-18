@@ -53,6 +53,16 @@ Handle<Code> NamedLoadHandlerCompiler::ComputeLoadNonexistent(
   while (true) {
     if (current_map->is_dictionary_map()) cache_name = name;
     if (current_map->prototype()->IsNull()) break;
+    if (name->IsPrivate()) {
+      // TODO(verwaest): Use nonexistent_private_symbol.
+      cache_name = name;
+      JSReceiver* prototype = JSReceiver::cast(current_map->prototype());
+      if (!prototype->map()->is_hidden_prototype() &&
+          !prototype->map()->IsGlobalObjectMap()) {
+        break;
+      }
+    }
+
     last = handle(JSObject::cast(current_map->prototype()));
     current_map = handle(last->map());
   }
@@ -97,6 +107,20 @@ Register NamedLoadHandlerCompiler::FrontendHeader(Register object_reg,
     function_index = Context::SYMBOL_FUNCTION_INDEX;
   } else if (map()->instance_type() == HEAP_NUMBER_TYPE) {
     function_index = Context::NUMBER_FUNCTION_INDEX;
+  } else if (map()->instance_type() == FLOAT32X4_TYPE) {
+    function_index = Context::FLOAT32X4_FUNCTION_INDEX;
+  } else if (map()->instance_type() == INT32X4_TYPE) {
+    function_index = Context::INT32X4_FUNCTION_INDEX;
+  } else if (map()->instance_type() == BOOL32X4_TYPE) {
+    function_index = Context::BOOL32X4_FUNCTION_INDEX;
+  } else if (map()->instance_type() == INT16X8_TYPE) {
+    function_index = Context::INT16X8_FUNCTION_INDEX;
+  } else if (map()->instance_type() == BOOL16X8_TYPE) {
+    function_index = Context::BOOL16X8_FUNCTION_INDEX;
+  } else if (map()->instance_type() == INT8X16_TYPE) {
+    function_index = Context::INT8X16_FUNCTION_INDEX;
+  } else if (map()->instance_type() == BOOL8X16_TYPE) {
+    function_index = Context::BOOL8X16_FUNCTION_INDEX;
   } else if (*map() == isolate()->heap()->boolean_map()) {
     function_index = Context::BOOLEAN_FUNCTION_INDEX;
   } else {
@@ -428,8 +452,11 @@ Handle<Code> NamedStoreHandlerCompiler::CompileStoreTransition(
   if (is_nonexistent) {
     // Find the top object.
     Handle<JSObject> last;
+    PrototypeIterator::WhereToEnd end =
+        name->IsPrivate() ? PrototypeIterator::END_AT_NON_HIDDEN
+                          : PrototypeIterator::END_AT_NULL;
     PrototypeIterator iter(isolate(), holder());
-    while (!iter.IsAtEnd()) {
+    while (!iter.IsAtEnd(end)) {
       last = Handle<JSObject>::cast(PrototypeIterator::GetCurrent(iter));
       iter.Advance();
     }
@@ -450,11 +477,17 @@ Handle<Code> NamedStoreHandlerCompiler::CompileStoreTransition(
   DCHECK(!transition->is_access_check_needed());
 
   // Call to respective StoreTransitionStub.
+  Register transition_map_reg = StoreTransitionDescriptor::MapRegister();
+  bool push_map_on_stack = transition_map_reg.is(no_reg);
+  Register map_reg = push_map_on_stack ? scratch1() : transition_map_reg;
+
   if (details.type() == DATA_CONSTANT) {
-    GenerateRestoreMap(transition, scratch2(), &miss);
     DCHECK(descriptors->GetValue(descriptor)->IsJSFunction());
-    Register map_reg = StoreTransitionDescriptor::MapRegister();
+    GenerateRestoreMap(transition, map_reg, scratch2(), &miss);
     GenerateConstantCheck(map_reg, descriptor, value(), scratch2(), &miss);
+    if (push_map_on_stack) {
+      GeneratePushMap(map_reg, scratch2());
+    }
     GenerateRestoreName(name);
     StoreTransitionStub stub(isolate());
     GenerateTailCall(masm(), stub.GetCode());
@@ -469,7 +502,10 @@ Handle<Code> NamedStoreHandlerCompiler::CompileStoreTransition(
             ? StoreTransitionStub::ExtendStorageAndStoreMapAndValue
             : StoreTransitionStub::StoreMapAndValue;
 
-    GenerateRestoreMap(transition, scratch2(), &miss);
+    GenerateRestoreMap(transition, map_reg, scratch2(), &miss);
+    if (push_map_on_stack) {
+      GeneratePushMap(map_reg, scratch2());
+    }
     GenerateRestoreName(name);
     StoreTransitionStub stub(isolate(),
                              FieldIndex::ForDescriptor(*transition, descriptor),
@@ -524,7 +560,8 @@ Handle<Code> NamedStoreHandlerCompiler::CompileStoreCallback(
 
 
 void ElementHandlerCompiler::CompileElementHandlers(
-    MapHandleList* receiver_maps, CodeHandleList* handlers) {
+    MapHandleList* receiver_maps, CodeHandleList* handlers,
+    LanguageMode language_mode) {
   for (int i = 0; i < receiver_maps->length(); ++i) {
     Handle<Map> receiver_map = receiver_maps->at(i);
     Handle<Code> cached_stub;
@@ -532,7 +569,9 @@ void ElementHandlerCompiler::CompileElementHandlers(
     if (receiver_map->IsStringMap()) {
       cached_stub = LoadIndexedStringStub(isolate()).GetCode();
     } else if (receiver_map->instance_type() < FIRST_JS_RECEIVER_TYPE) {
-      cached_stub = isolate()->builtins()->KeyedLoadIC_Slow();
+      cached_stub = is_strong(language_mode)
+                        ? isolate()->builtins()->KeyedLoadIC_Slow_Strong()
+                        : isolate()->builtins()->KeyedLoadIC_Slow();
     } else {
       bool is_js_array = receiver_map->instance_type() == JS_ARRAY_TYPE;
       ElementsKind elements_kind = receiver_map->elements_kind();
@@ -540,21 +579,25 @@ void ElementHandlerCompiler::CompileElementHandlers(
       // No need to check for an elements-free prototype chain here, the
       // generated stub code needs to check that dynamically anyway.
       bool convert_hole_to_undefined =
-          is_js_array && elements_kind == FAST_HOLEY_ELEMENTS &&
-          *receiver_map == isolate()->get_initial_js_array_map(elements_kind);
+          (is_js_array && elements_kind == FAST_HOLEY_ELEMENTS &&
+           *receiver_map ==
+               isolate()->get_initial_js_array_map(elements_kind)) &&
+          !is_strong(language_mode);
 
       if (receiver_map->has_indexed_interceptor()) {
         cached_stub = LoadIndexedInterceptorStub(isolate()).GetCode();
       } else if (IsSloppyArgumentsElements(elements_kind)) {
         cached_stub = KeyedLoadSloppyArgumentsStub(isolate()).GetCode();
       } else if (IsFastElementsKind(elements_kind) ||
-                 IsExternalArrayElementsKind(elements_kind) ||
                  IsFixedTypedArrayElementsKind(elements_kind)) {
         cached_stub = LoadFastElementStub(isolate(), is_js_array, elements_kind,
                                           convert_hole_to_undefined).GetCode();
       } else {
         DCHECK(elements_kind == DICTIONARY_ELEMENTS);
-        cached_stub = LoadDictionaryElementStub(isolate()).GetCode();
+        LoadICState state =
+            LoadICState(is_strong(language_mode) ? LoadICState::kStrongModeState
+                                                 : kNoExtraICState);
+        cached_stub = LoadDictionaryElementStub(isolate(), state).GetCode();
       }
     }
 

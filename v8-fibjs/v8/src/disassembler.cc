@@ -6,7 +6,7 @@
 
 #include "src/code-stubs.h"
 #include "src/codegen.h"
-#include "src/debug.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
@@ -43,7 +43,7 @@ const char* V8NameConverter::NameOfAddress(byte* pc) const {
     int offs = static_cast<int>(pc - code_->instruction_start());
     // print as code offset, if it seems reasonable
     if (0 <= offs && offs < code_->instruction_size()) {
-      SNPrintF(v8_buffer_, "%x  (%p)", offs, pc);
+      SNPrintF(v8_buffer_, "%d  (%p)", offs, pc);
       return v8_buffer_.start();
     }
   }
@@ -100,8 +100,8 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
       int num_const = d.ConstantPoolSizeAt(pc);
       if (num_const >= 0) {
         SNPrintF(decode_buffer,
-                 "%08x       constant pool begin",
-                 *reinterpret_cast<int32_t*>(pc));
+                 "%08x       constant pool begin (num_const = %d)",
+                 *reinterpret_cast<int32_t*>(pc), num_const);
         constants = num_const;
         pc += 4;
       } else if (it != NULL && !it->done() && it->rinfo()->pc() == pc &&
@@ -146,7 +146,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
     }
 
     // Instruction address and instruction offset.
-    out.AddFormatted("%p  %4x  ", prev_pc, prev_pc - begin);
+    out.AddFormatted("%p  %4d  ", prev_pc, prev_pc - begin);
 
     // Instruction.
     out.AddFormatted("%s", decode_buffer.start());
@@ -182,7 +182,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
         HeapStringAllocator allocator;
         StringStream accumulator(&allocator);
         relocinfo.target_object()->ShortPrint(&accumulator);
-        SmartArrayPointer<const char> obj_name = accumulator.ToCString();
+        base::SmartArrayPointer<const char> obj_name = accumulator.ToCString();
         out.AddFormatted("    ;; object: %s", obj_name.get());
       } else if (rmode == RelocInfo::EXTERNAL_REFERENCE) {
         const char* reference_name = ref_encoder.NameOfAddress(
@@ -197,8 +197,8 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
         Code::Kind kind = code->kind();
         if (code->is_inline_cache_stub()) {
           if (kind == Code::LOAD_IC &&
-              LoadICState::GetContextualMode(code->extra_ic_state()) ==
-                  CONTEXTUAL) {
+              LoadICState::GetTypeofMode(code->extra_ic_state()) ==
+                  NOT_INSIDE_TYPEOF) {
             out.AddFormatted(" contextual,");
           }
           InlineCacheState ic_state = code->ic_state();
@@ -216,15 +216,7 @@ static int DecodeIt(Isolate* isolate, std::ostream* os,
           DCHECK(major_key == CodeStub::MajorKeyFromKey(key));
           out.AddFormatted(" %s, %s, ", Code::Kind2String(kind),
                            CodeStub::MajorName(major_key, false));
-          switch (major_key) {
-            case CodeStub::CallFunction: {
-              int argc = CallFunctionStub::ExtractArgcFromMinorKey(minor_key);
-              out.AddFormatted("argc = %d", argc);
-              break;
-            }
-            default:
-              out.AddFormatted("minor: %d", minor_key);
-          }
+          out.AddFormatted("minor: %d", minor_key);
         } else {
           out.AddFormatted(" %s", Code::Kind2String(kind));
         }

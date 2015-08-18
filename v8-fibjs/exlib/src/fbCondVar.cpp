@@ -7,46 +7,50 @@
  */
 
 #include "service.h"
+#include <assert.h>
 
 namespace exlib
 {
 
 void CondVar::wait(Locker &l)
 {
-    Service *pService = Service::getFiberService();
+	l.unlock();
 
-    if (pService)
-    {
-        l.unlock();
+	Thread_base* current = Thread_base::current();
+	assert(current != 0);
 
-        m_blocks.put(pService->m_running);
-        pService->switchtonext();
+	m_lock.lock();
+	m_blocks.putTail(current);
+	m_lock.unlock();
 
-        l.lock();
-    }
+	current->suspend();
+
+	l.lock();
 }
 
 void CondVar::notify_one()
 {
-    if (!m_blocks.empty())
-    {
-        Service *pService = Service::getFiberService();
+	Thread_base* fb;
 
-        if (pService)
-            pService->m_resume.put(m_blocks.get());
-    }
+	m_lock.lock();
+	fb = m_blocks.getHead();
+	m_lock.unlock();
+
+	if (fb != 0)
+		fb->resume();
 }
 
 void CondVar::notify_all()
 {
-    if (!m_blocks.empty())
-    {
-        Service *pService = Service::getFiberService();
+	List<Thread_base> blocks;
 
-        if (pService)
-            while (!m_blocks.empty())
-                pService->m_resume.put(m_blocks.get());
-    }
+	m_lock.lock();
+	m_blocks.getList(blocks);
+	m_lock.unlock();
+
+	Thread_base* fb;
+	while ((fb = blocks.getHead()) != 0)
+		fb->resume();
 }
 
 }

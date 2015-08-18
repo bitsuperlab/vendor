@@ -19,13 +19,18 @@ namespace v8 {
 namespace internal {
 
 
+RUNTIME_FUNCTION(UnexpectedStubMiss) {
+  FATAL("Unexpected deopt of a stub");
+  return Smi::FromInt(0);
+}
+
+
 CodeStubDescriptor::CodeStubDescriptor(CodeStub* stub)
     : call_descriptor_(stub->GetCallInterfaceDescriptor()),
       stack_parameter_count_(no_reg),
       hint_stack_parameter_count_(-1),
       function_mode_(NOT_JS_FUNCTION_STUB_MODE),
       deoptimization_handler_(NULL),
-      handler_arguments_mode_(DONT_PASS_ARGUMENTS),
       miss_handler_(),
       has_miss_handler_(false) {
   stub->InitializeDescriptor(this);
@@ -37,7 +42,6 @@ CodeStubDescriptor::CodeStubDescriptor(Isolate* isolate, uint32_t stub_key)
       hint_stack_parameter_count_(-1),
       function_mode_(NOT_JS_FUNCTION_STUB_MODE),
       deoptimization_handler_(NULL),
-      handler_arguments_mode_(DONT_PASS_ARGUMENTS),
       miss_handler_(),
       has_miss_handler_(false) {
   CodeStub::InitializeDescriptor(isolate, stub_key, this);
@@ -56,11 +60,9 @@ void CodeStubDescriptor::Initialize(Address deoptimization_handler,
 void CodeStubDescriptor::Initialize(Register stack_parameter_count,
                                     Address deoptimization_handler,
                                     int hint_stack_parameter_count,
-                                    StubFunctionMode function_mode,
-                                    HandlerArgumentsMode handler_mode) {
+                                    StubFunctionMode function_mode) {
   Initialize(deoptimization_handler, hint_stack_parameter_count, function_mode);
   stack_parameter_count_ = stack_parameter_count;
-  handler_arguments_mode_ = handler_mode;
 }
 
 
@@ -123,7 +125,6 @@ Handle<Code> PlatformCodeStub::GenerateCode() {
   // Create the code object.
   CodeDesc desc;
   masm.GetCode(&desc);
-
   // Copy the generated code into a heap object.
   Code::Flags flags = Code::ComputeFlags(
       GetCodeKind(),
@@ -468,11 +469,8 @@ namespace {
 
 Handle<JSFunction> GetFunction(Isolate* isolate, const char* name) {
   v8::ExtensionConfiguration no_extensions;
-  Handle<Context> ctx = isolate->bootstrapper()->CreateEnvironment(
-      MaybeHandle<JSGlobalProxy>(), v8::Handle<v8::ObjectTemplate>(),
-      &no_extensions);
-  Handle<JSBuiltinsObject> builtins = handle(ctx->builtins());
-  MaybeHandle<Object> fun = Object::GetProperty(isolate, builtins, name);
+  MaybeHandle<Object> fun = Object::GetProperty(
+      isolate, isolate->factory()->code_stub_exports_object(), name);
   Handle<JSFunction> function = Handle<JSFunction>::cast(fun.ToHandleChecked());
   DCHECK(!function->IsUndefined() &&
          "JavaScript implementation of stub not found");
@@ -502,6 +500,9 @@ Handle<Code> TurboFanCodeStub::GenerateCode() {
   // Build a "hybrid" CompilationInfo for a JSFunction/CodeStub pair.
   ParseInfo parse_info(&zone, inner);
   CompilationInfo info(&parse_info);
+  info.SetFunctionType(GetCallInterfaceDescriptor().GetFunctionType());
+  info.MarkAsContextSpecializing();
+  info.MarkAsDeoptimizationEnabled();
   info.SetStub(this);
   return info.GenerateCodeStub();
 }
@@ -620,29 +621,34 @@ void JSEntryStub::FinishCode(Handle<Code> code) {
 
 void LoadDictionaryElementStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(KeyedLoadIC_MissFromStubFailure));
+  descriptor->Initialize(
+      FUNCTION_ADDR(Runtime_KeyedLoadIC_MissFromStubFailure));
 }
 
 
 void KeyedLoadGenericStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
   descriptor->Initialize(
-      Runtime::FunctionForId(Runtime::kKeyedGetProperty)->entry);
+      Runtime::FunctionForId(is_strong(language_mode())
+                                 ? Runtime::kKeyedGetPropertyStrong
+                                 : Runtime::kKeyedGetProperty)->entry);
 }
 
 
 void HandlerStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
   if (kind() == Code::STORE_IC) {
-    descriptor->Initialize(FUNCTION_ADDR(StoreIC_MissFromStubFailure));
+    descriptor->Initialize(FUNCTION_ADDR(Runtime_StoreIC_MissFromStubFailure));
   } else if (kind() == Code::KEYED_LOAD_IC) {
-    descriptor->Initialize(FUNCTION_ADDR(KeyedLoadIC_MissFromStubFailure));
+    descriptor->Initialize(
+        FUNCTION_ADDR(Runtime_KeyedLoadIC_MissFromStubFailure));
   } else if (kind() == Code::KEYED_STORE_IC) {
-    descriptor->Initialize(FUNCTION_ADDR(KeyedStoreIC_MissFromStubFailure));
+    descriptor->Initialize(
+        FUNCTION_ADDR(Runtime_KeyedStoreIC_MissFromStubFailure));
   }
 }
 
 
-CallInterfaceDescriptor HandlerStub::GetCallInterfaceDescriptor() {
+CallInterfaceDescriptor HandlerStub::GetCallInterfaceDescriptor() const {
   if (kind() == Code::LOAD_IC || kind() == Code::KEYED_LOAD_IC) {
     return LoadWithVectorDescriptor(isolate());
   } else {
@@ -654,17 +660,25 @@ CallInterfaceDescriptor HandlerStub::GetCallInterfaceDescriptor() {
 
 void StoreFastElementStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(KeyedStoreIC_MissFromStubFailure));
+  descriptor->Initialize(
+      FUNCTION_ADDR(Runtime_KeyedStoreIC_MissFromStubFailure));
 }
 
 
 void ElementsTransitionAndStoreStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(ElementsTransitionAndStoreIC_Miss));
+  descriptor->Initialize(
+      FUNCTION_ADDR(Runtime_ElementsTransitionAndStoreIC_Miss));
 }
 
 
-CallInterfaceDescriptor StoreTransitionStub::GetCallInterfaceDescriptor() {
+void ToObjectStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
+  descriptor->Initialize(Runtime::FunctionForId(Runtime::kToObject)->entry);
+}
+
+
+CallInterfaceDescriptor StoreTransitionStub::GetCallInterfaceDescriptor()
+    const {
   return StoreTransitionDescriptor(isolate());
 }
 
@@ -684,7 +698,7 @@ void TypeofStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {}
 void NumberToStringStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
   NumberToStringDescriptor call_descriptor(isolate());
   descriptor->Initialize(
-      Runtime::FunctionForId(Runtime::kNumberToStringRT)->entry);
+      Runtime::FunctionForId(Runtime::kNumberToString)->entry);
 }
 
 
@@ -713,7 +727,7 @@ void CreateWeakCellStub::InitializeDescriptor(CodeStubDescriptor* d) {}
 void RegExpConstructResultStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
   descriptor->Initialize(
-      Runtime::FunctionForId(Runtime::kRegExpConstructResultRT)->entry);
+      Runtime::FunctionForId(Runtime::kRegExpConstructResult)->entry);
 }
 
 
@@ -732,34 +746,35 @@ void AllocateHeapNumberStub::InitializeDescriptor(
 
 
 void CompareNilICStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(CompareNilIC_Miss));
-  descriptor->SetMissHandler(
-      ExternalReference(IC_Utility(IC::kCompareNilIC_Miss), isolate()));
+  descriptor->Initialize(FUNCTION_ADDR(Runtime_CompareNilIC_Miss));
+  descriptor->SetMissHandler(ExternalReference(
+      Runtime::FunctionForId(Runtime::kCompareNilIC_Miss), isolate()));
 }
 
 
 void ToBooleanStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(ToBooleanIC_Miss));
-  descriptor->SetMissHandler(
-      ExternalReference(IC_Utility(IC::kToBooleanIC_Miss), isolate()));
+  descriptor->Initialize(FUNCTION_ADDR(Runtime_ToBooleanIC_Miss));
+  descriptor->SetMissHandler(ExternalReference(
+      Runtime::FunctionForId(Runtime::kToBooleanIC_Miss), isolate()));
 }
 
 
 void BinaryOpICStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(BinaryOpIC_Miss));
-  descriptor->SetMissHandler(
-      ExternalReference(IC_Utility(IC::kBinaryOpIC_Miss), isolate()));
+  descriptor->Initialize(FUNCTION_ADDR(Runtime_BinaryOpIC_Miss));
+  descriptor->SetMissHandler(ExternalReference(
+      Runtime::FunctionForId(Runtime::kBinaryOpIC_Miss), isolate()));
 }
 
 
 void BinaryOpWithAllocationSiteStub::InitializeDescriptor(
     CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(FUNCTION_ADDR(BinaryOpIC_MissWithAllocationSite));
+  descriptor->Initialize(
+      FUNCTION_ADDR(Runtime_BinaryOpIC_MissWithAllocationSite));
 }
 
 
 void StringAddStub::InitializeDescriptor(CodeStubDescriptor* descriptor) {
-  descriptor->Initialize(Runtime::FunctionForId(Runtime::kStringAddRT)->entry);
+  descriptor->Initialize(Runtime::FunctionForId(Runtime::kStringAdd)->entry);
 }
 
 
@@ -797,7 +812,6 @@ void StoreElementStub::Generate(MacroAssembler* masm) {
     case FAST_DOUBLE_ELEMENTS:
     case FAST_HOLEY_DOUBLE_ELEMENTS:
 #define TYPED_ARRAY_CASE(Type, type, TYPE, ctype, size) \
-    case EXTERNAL_##TYPE##_ELEMENTS:                    \
     case TYPE##_ELEMENTS:
 
     TYPED_ARRAYS(TYPED_ARRAY_CASE)
@@ -807,7 +821,8 @@ void StoreElementStub::Generate(MacroAssembler* masm) {
     case DICTIONARY_ELEMENTS:
       ElementHandlerCompiler::GenerateStoreSlow(masm);
       break;
-    case SLOPPY_ARGUMENTS_ELEMENTS:
+    case FAST_SLOPPY_ARGUMENTS_ELEMENTS:
+    case SLOW_SLOPPY_ARGUMENTS_ELEMENTS:
       UNREACHABLE();
       break;
   }
@@ -924,7 +939,7 @@ bool ToBooleanStub::UpdateStatus(Handle<Object> object) {
   Types old_types = new_types;
   bool to_boolean_value = new_types.UpdateStatus(object);
   TraceTransition(old_types, new_types);
-  set_sub_minor_key(TypesBits::update(sub_minor_key(), new_types.ToByte()));
+  set_sub_minor_key(TypesBits::update(sub_minor_key(), new_types.ToIntegral()));
   return to_boolean_value;
 }
 
@@ -946,6 +961,7 @@ std::ostream& operator<<(std::ostream& os, const ToBooleanStub::Types& s) {
   if (s.Contains(ToBooleanStub::STRING)) p.Add("String");
   if (s.Contains(ToBooleanStub::SYMBOL)) p.Add("Symbol");
   if (s.Contains(ToBooleanStub::HEAP_NUMBER)) p.Add("HeapNumber");
+  if (s.Contains(ToBooleanStub::SIMD_VALUE)) p.Add("SimdValue");
   return os << ")";
 }
 
@@ -978,6 +994,9 @@ bool ToBooleanStub::Types::UpdateStatus(Handle<Object> object) {
     Add(HEAP_NUMBER);
     double value = HeapNumber::cast(*object)->value();
     return value != 0 && !std::isnan(value);
+  } else if (object->IsSimd128Value()) {
+    Add(SIMD_VALUE);
+    return true;
   } else {
     // We should never see an internal object at runtime here!
     UNREACHABLE();
@@ -987,10 +1006,10 @@ bool ToBooleanStub::Types::UpdateStatus(Handle<Object> object) {
 
 
 bool ToBooleanStub::Types::NeedsMap() const {
-  return Contains(ToBooleanStub::SPEC_OBJECT)
-      || Contains(ToBooleanStub::STRING)
-      || Contains(ToBooleanStub::SYMBOL)
-      || Contains(ToBooleanStub::HEAP_NUMBER);
+  return Contains(ToBooleanStub::SPEC_OBJECT) ||
+         Contains(ToBooleanStub::STRING) || Contains(ToBooleanStub::SYMBOL) ||
+         Contains(ToBooleanStub::HEAP_NUMBER) ||
+         Contains(ToBooleanStub::SIMD_VALUE);
 }
 
 
@@ -1046,5 +1065,21 @@ InternalArrayConstructorStub::InternalArrayConstructorStub(
 }
 
 
+Representation RepresentationFromType(Type* type) {
+  if (type->Is(Type::UntaggedSigned()) || type->Is(Type::UntaggedUnsigned())) {
+    return Representation::Integer32();
+  }
+
+  if (type->Is(Type::TaggedSigned())) {
+    return Representation::Smi();
+  }
+
+  if (type->Is(Type::UntaggedPointer())) {
+    return Representation::External();
+  }
+
+  DCHECK(!type->Is(Type::Untagged()));
+  return Representation::Tagged();
+}
 }  // namespace internal
 }  // namespace v8

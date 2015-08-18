@@ -85,6 +85,9 @@ class RingBuffer {
 };
 
 
+enum ScavengeSpeedMode { kForAllObjects, kForSurvivedObjects };
+
+
 // GCTracer collects and prints ONE line after each garbage collector
 // invocation IFF --trace_gc is used.
 // TODO(ernstm): Unit tests.
@@ -101,6 +104,7 @@ class GCTracer {
       MC_SWEEP_CODE,
       MC_SWEEP_CELL,
       MC_SWEEP_MAP,
+      MC_RESCAN_LARGE_OBJECTS,
       MC_EVACUATE_PAGES,
       MC_UPDATE_NEW_TO_NEW_POINTERS,
       MC_UPDATE_ROOT_TO_NEW_POINTERS,
@@ -114,6 +118,13 @@ class GCTracer {
       MC_WEAKCOLLECTION_CLEAR,
       MC_WEAKCOLLECTION_ABORT,
       MC_FLUSH_CODE,
+      SCAVENGER_CODE_FLUSH_CANDIDATES,
+      SCAVENGER_OBJECT_GROUPS,
+      SCAVENGER_OLD_TO_NEW_POINTERS,
+      SCAVENGER_ROOTS,
+      SCAVENGER_SCAVENGE,
+      SCAVENGER_SEMISPACE,
+      SCAVENGER_WEAK,
       NUMBER_OF_SCOPES
     };
 
@@ -227,6 +238,8 @@ class GCTracer {
 
     // Size of new space objects in constructor.
     intptr_t new_space_object_size;
+    // Size of survived new space objects in desctructor.
+    intptr_t survived_new_space_object_size;
 
     // Number of incremental marking steps since creation of tracer.
     // (value at start of event)
@@ -371,7 +384,8 @@ class GCTracer {
 
   // Compute the average scavenge speed in bytes/millisecond.
   // Returns 0 if no events have been recorded.
-  intptr_t ScavengeSpeedInBytesPerMillisecond() const;
+  intptr_t ScavengeSpeedInBytesPerMillisecond(
+      ScavengeSpeedMode mode = kForAllObjects) const;
 
   // Compute the average mark-sweep speed in bytes/millisecond.
   // Returns 0 if no events have been recorded.

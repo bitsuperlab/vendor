@@ -62,6 +62,7 @@ class LCodeGen: public LCodeGenBase {
   Register ToRegister(LOperand* op) const;
   XMMRegister ToDoubleRegister(LOperand* op) const;
   bool IsInteger32Constant(LConstantOperand* op) const;
+  bool IsExternalConstant(LConstantOperand* op) const;
   bool IsDehoistedKeyConstant(LConstantOperand* op) const;
   bool IsSmiConstant(LConstantOperand* op) const;
   int32_t ToRepresentation(LConstantOperand* op, const Representation& r) const;
@@ -305,6 +306,8 @@ class LCodeGen: public LCodeGenBase {
 
   template <class T>
   void EmitVectorLoadICRegisters(T* instr);
+  template <class T>
+  void EmitVectorStoreICRegisters(T* instr);
 
 #ifdef _MSC_VER
   // On windows, you may not access the stack more than one page below

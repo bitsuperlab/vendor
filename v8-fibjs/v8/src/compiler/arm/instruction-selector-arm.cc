@@ -918,6 +918,17 @@ void InstructionSelector::VisitTruncateFloat64ToFloat32(Node* node) {
 }
 
 
+void InstructionSelector::VisitTruncateFloat64ToInt32(Node* node) {
+  switch (TruncationModeOf(node->op())) {
+    case TruncationMode::kJavaScript:
+      return VisitRR(this, kArchTruncateDoubleToI, node);
+    case TruncationMode::kRoundToZero:
+      return VisitRR(this, kArmVcvtS32F64, node);
+  }
+  UNREACHABLE();
+}
+
+
 void InstructionSelector::VisitFloat32Add(Node* node) {
   ArmOperandGenerator g(this);
   Float32BinopMatcher m(node);
@@ -1100,11 +1111,27 @@ void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
   // TODO(turbofan): on ARM it's probably better to use the code object in a
   // register if there are multiple uses of it. Improve constant pool and the
   // heuristics in the register allocator for where to emit constants.
-  InitializeCallBuffer(node, &buffer, true, false);
+  InitializeCallBuffer(node, &buffer, true, true);
 
-  // Push any stack arguments.
-  for (Node* node : base::Reversed(buffer.pushed_nodes)) {
-    Emit(kArmPush, g.NoOutput(), g.UseRegister(node));
+  // Prepare for C function call.
+  if (descriptor->IsCFunctionCall()) {
+    Emit(kArchPrepareCallCFunction |
+             MiscField::encode(static_cast<int>(descriptor->CParameterCount())),
+         0, nullptr, 0, nullptr);
+
+    // Poke any stack arguments.
+    for (size_t n = 0; n < buffer.pushed_nodes.size(); ++n) {
+      if (Node* node = buffer.pushed_nodes[n]) {
+        int const slot = static_cast<int>(n);
+        InstructionOperand value = g.UseRegister(node);
+        Emit(kArmPoke | MiscField::encode(slot), g.NoOutput(), value);
+      }
+    }
+  } else {
+    // Push any stack arguments.
+    for (Node* node : base::Reversed(buffer.pushed_nodes)) {
+      Emit(kArmPush, g.NoOutput(), g.UseRegister(node));
+    }
   }
 
   // Pass label of exception handler block.
@@ -1122,18 +1149,21 @@ void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
   // Select the appropriate opcode based on the call type.
   InstructionCode opcode;
   switch (descriptor->kind()) {
-    case CallDescriptor::kCallCodeObject: {
-      opcode = kArchCallCodeObject;
+    case CallDescriptor::kCallAddress:
+      opcode =
+          kArchCallCFunction |
+          MiscField::encode(static_cast<int>(descriptor->CParameterCount()));
       break;
-    }
+    case CallDescriptor::kCallCodeObject:
+      opcode = kArchCallCodeObject | MiscField::encode(flags);
+      break;
     case CallDescriptor::kCallJSFunction:
-      opcode = kArchCallJSFunction;
+      opcode = kArchCallJSFunction | MiscField::encode(flags);
       break;
     default:
       UNREACHABLE();
       return;
   }
-  opcode |= MiscField::encode(flags);
 
   // Emit the call instruction.
   size_t const output_count = buffer.outputs.size();
@@ -1151,9 +1181,7 @@ void InstructionSelector::VisitTailCall(Node* node) {
   DCHECK_EQ(0, descriptor->flags() & CallDescriptor::kNeedsNopAfterCall);
 
   // TODO(turbofan): Relax restriction for stack parameters.
-  if (descriptor->UsesOnlyRegisters() &&
-      descriptor->HasSameReturnLocationsAs(
-          linkage()->GetIncomingDescriptor())) {
+  if (linkage()->GetIncomingDescriptor()->CanTailCall(node)) {
     CallBuffer buffer(zone(), descriptor, nullptr);
 
     // Compute InstructionOperands for inputs and outputs.
@@ -1162,12 +1190,11 @@ void InstructionSelector::VisitTailCall(Node* node) {
     // heuristics in the register allocator for where to emit constants.
     InitializeCallBuffer(node, &buffer, true, false);
 
-    DCHECK_EQ(0u, buffer.pushed_nodes.size());
-
     // Select the appropriate opcode based on the call type.
     InstructionCode opcode;
     switch (descriptor->kind()) {
       case CallDescriptor::kCallCodeObject:
+      case CallDescriptor::kInterpreterDispatch:
         opcode = kArchTailCallCodeObject;
         break;
       case CallDescriptor::kCallJSFunction:
