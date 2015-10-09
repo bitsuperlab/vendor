@@ -5,14 +5,14 @@
 #ifndef V8_HEAP_INCREMENTAL_MARKING_H_
 #define V8_HEAP_INCREMENTAL_MARKING_H_
 
-
+#include "src/cancelable-task.h"
 #include "src/execution.h"
+#include "src/heap/incremental-marking-job.h"
 #include "src/heap/mark-compact.h"
 #include "src/objects.h"
 
 namespace v8 {
 namespace internal {
-
 
 class IncrementalMarking {
  public:
@@ -82,9 +82,7 @@ class IncrementalMarking {
 
   bool WasActivated();
 
-  void Start(int mark_compact_flags,
-             const GCCallbackFlags gc_callback_flags = kNoGCCallbackFlags,
-             const char* reason = nullptr);
+  void Start(const char* reason = nullptr);
 
   void MarkObjectGroups();
 
@@ -200,7 +198,9 @@ class IncrementalMarking {
 
   Heap* heap() const { return heap_; }
 
-  GCCallbackFlags CallbackFlags() const { return gc_callback_flags_; }
+  IncrementalMarkingJob* incremental_marking_job() {
+    return &incremental_marking_job_;
+  }
 
  private:
   int64_t SpaceLeftInOldSpace();
@@ -260,7 +260,7 @@ class IncrementalMarking {
 
   GCRequestType request_type_;
 
-  GCCallbackFlags gc_callback_flags_;
+  IncrementalMarkingJob incremental_marking_job_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(IncrementalMarking);
 };

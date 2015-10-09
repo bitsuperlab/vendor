@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
+#include "src/objects.h"
 
+#include "src/bootstrapper.h"
 #include "src/disasm.h"
 #include "src/disassembler.h"
 #include "src/macro-assembler.h"
@@ -35,6 +36,7 @@ void Object::VerifyPointer(Object* p) {
 
 void Smi::SmiVerify() {
   CHECK(IsSmi());
+  CHECK(!IsCallable());
 }
 
 
@@ -142,6 +144,9 @@ void HeapObject::HeapObjectVerify() {
     case JS_MAP_ITERATOR_TYPE:
       JSMapIterator::cast(this)->JSMapIteratorVerify();
       break;
+    case JS_ITERATOR_RESULT_TYPE:
+      JSIteratorResult::cast(this)->JSIteratorResultVerify();
+      break;
     case JS_WEAK_MAP_TYPE:
       JSWeakMap::cast(this)->JSWeakMapVerify();
       break;
@@ -224,6 +229,8 @@ void ByteArray::ByteArrayVerify() {
 void BytecodeArray::BytecodeArrayVerify() {
   // TODO(oth): Walk bytecodes and immediate values to validate sanity.
   CHECK(IsBytecodeArray());
+  CHECK(constant_pool()->IsFixedArray());
+  VerifyHeapPointer(constant_pool());
 }
 
 
@@ -336,7 +343,7 @@ void Map::DictionaryMapVerify() {
   CHECK(is_dictionary_map());
   CHECK(instance_descriptors()->IsEmpty());
   CHECK_EQ(0, unused_property_fields());
-  CHECK_EQ(StaticVisitorBase::GetVisitorId(this), visitor_id());
+  CHECK_EQ(Heap::GetStaticVisitorIdForMap(this), visitor_id());
 }
 
 
@@ -530,6 +537,7 @@ void JSFunction::JSFunctionVerify() {
   CHECK(next_function_link() == NULL ||
         next_function_link()->IsUndefined() ||
         next_function_link()->IsJSFunction());
+  CHECK(map()->is_callable());
 }
 
 
@@ -736,6 +744,14 @@ void JSMapIterator::JSMapIteratorVerify() {
 }
 
 
+void JSIteratorResult::JSIteratorResultVerify() {
+  CHECK(IsJSIteratorResult());
+  JSObjectVerify();
+  VerifyPointer(done());
+  VerifyPointer(value());
+}
+
+
 void JSWeakMap::JSWeakMapVerify() {
   CHECK(IsJSWeakMap());
   JSObjectVerify();
@@ -808,6 +824,7 @@ void JSFunctionProxy::JSFunctionProxyVerify() {
   JSProxyVerify();
   VerifyPointer(call_trap());
   VerifyPointer(construct_trap());
+  CHECK(map()->is_callable());
 }
 
 
@@ -881,6 +898,14 @@ void AccessorInfo::AccessorInfoVerify() {
   VerifyPointer(name());
   VerifyPointer(flag());
   VerifyPointer(expected_receiver_type());
+}
+
+
+void SloppyBlockWithEvalContextExtension::
+    SloppyBlockWithEvalContextExtensionVerify() {
+  CHECK(IsSloppyBlockWithEvalContextExtension());
+  VerifyObjectField(kScopeInfoOffset);
+  VerifyObjectField(kExtensionOffset);
 }
 
 
@@ -1227,7 +1252,8 @@ bool CanLeak(Object* obj, Heap* heap, bool skip_weak_cell) {
   if (obj->IsMap()) {
     Map* map = Map::cast(obj);
     for (int i = 0; i < Heap::kStrongRootListLength; i++) {
-      if (map == heap->roots_array_start()[i]) return false;
+      Heap::RootListIndex root_index = static_cast<Heap::RootListIndex>(i);
+      if (map == heap->root(root_index)) return false;
     }
     return true;
   }
@@ -1254,9 +1280,11 @@ void Code::VerifyEmbeddedObjects(VerifyMode mode) {
 void Code::VerifyRecompiledCode(Code* old_code, Code* new_code) {
   if (old_code->kind() != FUNCTION) return;
   if (new_code->kind() != FUNCTION) return;
-  static const int mask = RelocInfo::kCodeTargetMask;
-
   Isolate* isolate = old_code->GetIsolate();
+  // Do not verify during bootstrapping. We may replace code using %SetCode.
+  if (isolate->bootstrapper()->IsActive()) return;
+
+  static const int mask = RelocInfo::kCodeTargetMask;
   RelocIterator old_it(old_code, mask);
   RelocIterator new_it(new_code, mask);
   Code* stack_check = isolate->builtins()->builtin(Builtins::kStackCheck);
@@ -1289,7 +1317,10 @@ void Code::VerifyRecompiledCode(Code* old_code, Code* new_code) {
     Code* new_target =
         Code::GetCodeFromTargetAddress(new_it.rinfo()->target_address());
     CHECK_EQ(old_target->kind(), new_target->kind());
-    if (!old_target->is_handler() && !old_target->is_inline_cache_stub()) {
+    // Check call target for equality unless it's an IC or an interrupt check.
+    // In both cases they may be patched to be something else.
+    if (!old_target->is_handler() && !old_target->is_inline_cache_stub() &&
+        new_target != isolate->builtins()->builtin(Builtins::kInterruptCheck)) {
       CHECK_EQ(old_target, new_target);
     }
     old_it.next();

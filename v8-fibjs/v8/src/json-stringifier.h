@@ -6,6 +6,7 @@
 #define V8_JSON_STRINGIFIER_H_
 
 #include "src/conversions.h"
+#include "src/lookup.h"
 #include "src/messages.h"
 #include "src/string-builder.h"
 #include "src/utils.h"
@@ -381,12 +382,12 @@ BasicJsonStringifier::Result BasicJsonStringifier::SerializeJSValue(
   if (class_name == isolate_->heap()->String_string()) {
     Handle<Object> value;
     ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-        isolate_, value, Execution::ToString(isolate_, object), EXCEPTION);
+        isolate_, value, Object::ToString(isolate_, object), EXCEPTION);
     SerializeString(Handle<String>::cast(value));
   } else if (class_name == isolate_->heap()->Number_string()) {
     Handle<Object> value;
-    ASSIGN_RETURN_ON_EXCEPTION_VALUE(
-        isolate_, value, Execution::ToNumber(isolate_, object), EXCEPTION);
+    ASSIGN_RETURN_ON_EXCEPTION_VALUE(isolate_, value, Object::ToNumber(object),
+                                     EXCEPTION);
     if (value->IsSmi()) return SerializeSmi(Smi::cast(*value));
     SerializeHeapNumber(Handle<HeapNumber>::cast(value));
   } else if (class_name == isolate_->heap()->Boolean_string()) {

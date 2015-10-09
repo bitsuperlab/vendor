@@ -55,12 +55,6 @@ void V8::TearDown() {
 }
 
 
-void V8::SetReturnAddressLocationResolver(
-      ReturnAddressLocationResolver resolver) {
-  StackFrame::SetReturnAddressLocationResolver(resolver);
-}
-
-
 void V8::InitializeOncePerProcessImpl() {
   FlagList::EnforceFlagImplications();
 
@@ -123,6 +117,9 @@ v8::Platform* V8::GetCurrentPlatform() {
   DCHECK(platform_);
   return platform_;
 }
+
+
+void V8::SetPlatformForTesting(v8::Platform* platform) { platform_ = platform; }
 
 
 void V8::SetNativesBlob(StartupData* natives_blob) {

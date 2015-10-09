@@ -66,17 +66,19 @@ class CodeFactory final {
   static Callable StoreGlobalViaContext(Isolate* isolate, int depth,
                                         LanguageMode language_mode);
 
-  static Callable Instanceof(Isolate* isolate, InstanceofStub::Flags flags);
+  static Callable InstanceOf(Isolate* isolate);
 
   static Callable ToBoolean(
       Isolate* isolate, ToBooleanStub::ResultMode mode,
       ToBooleanStub::Types types = ToBooleanStub::Types());
 
   static Callable ToNumber(Isolate* isolate);
+  static Callable ToString(Isolate* isolate);
   static Callable ToObject(Isolate* isolate);
 
   static Callable StringAdd(Isolate* isolate, StringAddFlags flags,
                             PretenureFlag pretenure_flag);
+  static Callable StringCompare(Isolate* isolate);
 
   static Callable Typeof(Isolate* isolate);
 
@@ -90,6 +92,8 @@ class CodeFactory final {
 
   static Callable CallFunction(Isolate* isolate, int argc,
                                CallFunctionFlags flags);
+
+  static Callable PushArgsAndCall(Isolate* isolate);
 };
 
 }  // namespace internal

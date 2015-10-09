@@ -6,6 +6,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/ppc/codegen-ppc.h"
+
 #if V8_TARGET_ARCH_PPC
 
 #include "src/codegen.h"
@@ -64,7 +66,7 @@ UnaryMathFunction CreateExpFunction() {
   DCHECK(!RelocInfo::RequiresRelocation(desc));
 #endif
 
-  CpuFeatures::FlushICache(buffer, actual_size);
+  Assembler::FlushICacheWithoutIsolate(buffer, actual_size);
   base::OS::ProtectCode(buffer, actual_size);
 
 #if !defined(USE_SIMULATOR)
@@ -101,7 +103,7 @@ UnaryMathFunction CreateSqrtFunction() {
   DCHECK(!RelocInfo::RequiresRelocation(desc));
 #endif
 
-  CpuFeatures::FlushICache(buffer, actual_size);
+  Assembler::FlushICacheWithoutIsolate(buffer, actual_size);
   base::OS::ProtectCode(buffer, actual_size);
   return FUNCTION_CAST<UnaryMathFunction>(buffer);
 #endif
@@ -662,7 +664,7 @@ void Code::PatchPlatformCodeAge(Isolate* isolate, byte* sequence, Code::Age age,
   uint32_t young_length = isolate->code_aging_helper()->young_sequence_length();
   if (age == kNoAgeCodeAge) {
     isolate->code_aging_helper()->CopyYoungSequenceTo(sequence);
-    CpuFeatures::FlushICache(sequence, young_length);
+    Assembler::FlushICache(isolate, sequence, young_length);
   } else {
     // FIXED_SEQUENCE
     Code* stub = GetCodeAgeStub(isolate, age, parity);

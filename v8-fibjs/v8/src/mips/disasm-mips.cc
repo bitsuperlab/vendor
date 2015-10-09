@@ -991,7 +991,7 @@ void Decoder::DecodeTypeRegisterSPECIAL(Instruction* instr) {
       Format(instr, "jr      'rs");
       break;
     case JALR:
-      Format(instr, "jalr    'rs");
+      Format(instr, "jalr    'rs, 'rd");
       break;
     case SLL:
       if (0x0 == static_cast<int>(instr->InstructionBits()))
@@ -1610,7 +1610,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
   out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
                                    "%08x       ",
                                    instr->InstructionBits());
-  switch (instr->InstructionType()) {
+  switch (instr->InstructionType(Instruction::EXTRA)) {
     case Instruction::kRegisterType: {
       DecodeTypeRegister(instr);
       break;

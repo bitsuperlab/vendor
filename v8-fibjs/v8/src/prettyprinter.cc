@@ -2,13 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <stdarg.h>
+#include "src/prettyprinter.h"
 
-#include "src/v8.h"
+#include <stdarg.h>
 
 #include "src/ast-value-factory.h"
 #include "src/base/platform/platform.h"
-#include "src/prettyprinter.h"
 #include "src/scopes.h"
 
 namespace v8 {
@@ -113,6 +112,12 @@ void CallPrinter::VisitExpressionStatement(ExpressionStatement* node) {
 
 
 void CallPrinter::VisitEmptyStatement(EmptyStatement* node) {}
+
+
+void CallPrinter::VisitSloppyBlockFunctionStatement(
+    SloppyBlockFunctionStatement* node) {
+  Find(node->statement());
+}
 
 
 void CallPrinter::VisitIfStatement(IfStatement* node) {
@@ -361,6 +366,11 @@ void CallPrinter::VisitSpread(Spread* node) {
 }
 
 
+void CallPrinter::VisitEmptyParentheses(EmptyParentheses* node) {
+  UNREACHABLE();
+}
+
+
 void CallPrinter::VisitThisFunction(ThisFunction* node) {}
 
 
@@ -492,6 +502,12 @@ void PrettyPrinter::VisitExpressionStatement(ExpressionStatement* node) {
 
 void PrettyPrinter::VisitEmptyStatement(EmptyStatement* node) {
   Print(";");
+}
+
+
+void PrettyPrinter::VisitSloppyBlockFunctionStatement(
+    SloppyBlockFunctionStatement* node) {
+  Visit(node->statement());
 }
 
 
@@ -796,8 +812,7 @@ void PrettyPrinter::VisitCallNew(CallNew* node) {
 
 
 void PrettyPrinter::VisitCallRuntime(CallRuntime* node) {
-  Print("%%");
-  PrintLiteral(node->name(), false);
+  Print("%%%s\n", node->debug_name());
   PrintArguments(node->arguments());
 }
 
@@ -846,6 +861,11 @@ void PrettyPrinter::VisitSpread(Spread* node) {
 }
 
 
+void PrettyPrinter::VisitEmptyParentheses(EmptyParentheses* node) {
+  Print("()");
+}
+
+
 void PrettyPrinter::VisitThisFunction(ThisFunction* node) {
   Print("<this-function>");
 }
@@ -887,7 +907,7 @@ const char* PrettyPrinter::PrintProgram(FunctionLiteral* program) {
 
 void PrettyPrinter::PrintOut(Isolate* isolate, Zone* zone, AstNode* node) {
   PrettyPrinter printer(isolate, zone);
-  PrintF("%s", printer.Print(node));
+  PrintF("%s\n", printer.Print(node));
 }
 
 
@@ -1208,6 +1228,12 @@ void AstPrinter::VisitEmptyStatement(EmptyStatement* node) {
 }
 
 
+void AstPrinter::VisitSloppyBlockFunctionStatement(
+    SloppyBlockFunctionStatement* node) {
+  Visit(node->statement());
+}
+
+
 void AstPrinter::VisitIfStatement(IfStatement* node) {
   IndentedScope indent(this, "IF");
   PrintIndentedVisit("CONDITION", node->condition());
@@ -1524,9 +1550,8 @@ void AstPrinter::VisitCallNew(CallNew* node) {
 
 void AstPrinter::VisitCallRuntime(CallRuntime* node) {
   EmbeddedVector<char, 128> buf;
-  FormatICSlotNode(&buf, node, "CALL RUNTIME", node->CallRuntimeFeedbackSlot());
+  SNPrintF(buf, "CALL RUNTIME %s", node->debug_name());
   IndentedScope indent(this, buf.start());
-  PrintLiteralIndented("NAME", node->name(), false);
   PrintArguments(node->arguments());
 }
 
@@ -1563,6 +1588,11 @@ void AstPrinter::VisitCompareOperation(CompareOperation* node) {
 void AstPrinter::VisitSpread(Spread* node) {
   IndentedScope indent(this, "...");
   Visit(node->expression());
+}
+
+
+void AstPrinter::VisitEmptyParentheses(EmptyParentheses* node) {
+  IndentedScope indent(this, "()");
 }
 
 

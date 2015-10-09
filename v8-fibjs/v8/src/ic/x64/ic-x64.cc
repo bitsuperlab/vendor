@@ -357,7 +357,7 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::LOAD_IC));
   masm->isolate()->stub_cache()->GenerateProbe(masm, Code::KEYED_LOAD_IC, flags,
-                                               false, receiver, key,
+                                               receiver, key,
                                                megamorphic_scratch, no_reg);
   // Cache miss.
   GenerateMiss(masm);
@@ -585,8 +585,8 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
 
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::STORE_IC));
-  masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::STORE_IC, flags, false, receiver, key, rbx, no_reg);
+  masm->isolate()->stub_cache()->GenerateProbe(masm, Code::STORE_IC, flags,
+                                               receiver, key, r9, no_reg);
   // Cache miss.
   __ jmp(&miss);
 
@@ -739,13 +739,18 @@ void KeyedLoadIC::GenerateRuntimeGetProperty(MacroAssembler* masm,
 
 
 void StoreIC::GenerateMegamorphic(MacroAssembler* masm) {
-  // The return address is on the stack.
+  if (FLAG_vector_stores) {
+    // This shouldn't be called.
+    __ int3();
+    return;
+  }
 
+  // The return address is on the stack.
   // Get the receiver from the stack and probe the stub cache.
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::STORE_IC));
   masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::STORE_IC, flags, false, StoreDescriptor::ReceiverRegister(),
+      masm, Code::STORE_IC, flags, StoreDescriptor::ReceiverRegister(),
       StoreDescriptor::NameRegister(), rbx, no_reg);
 
   // Cache miss: Jump to runtime.
@@ -789,7 +794,10 @@ void StoreIC::GenerateNormal(MacroAssembler* masm) {
   Register receiver = StoreDescriptor::ReceiverRegister();
   Register name = StoreDescriptor::NameRegister();
   Register value = StoreDescriptor::ValueRegister();
-  Register dictionary = rbx;
+  Register dictionary = r11;
+  DCHECK(!FLAG_vector_stores ||
+         !AreAliased(dictionary, VectorStoreICDescriptor::VectorRegister(),
+                     VectorStoreICDescriptor::SlotRegister()));
 
   Label miss;
 

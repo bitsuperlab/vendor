@@ -17,13 +17,15 @@ class PlatformInterfaceDescriptor;
   V(Load)                                     \
   V(Store)                                    \
   V(StoreTransition)                          \
+  V(VectorStoreTransition)                    \
   V(VectorStoreICTrampoline)                  \
   V(VectorStoreIC)                            \
-  V(Instanceof)                               \
+  V(InstanceOf)                               \
   V(LoadWithVector)                           \
   V(FastNewClosure)                           \
   V(FastNewContext)                           \
   V(ToNumber)                                 \
+  V(ToString)                                 \
   V(ToObject)                                 \
   V(NumberToString)                           \
   V(Typeof)                                   \
@@ -35,6 +37,8 @@ class PlatformInterfaceDescriptor;
   V(CallFunctionWithFeedback)                 \
   V(CallFunctionWithFeedbackAndVector)        \
   V(CallConstruct)                            \
+  V(CallTrampoline)                           \
+  V(PushArgsAndCall)                          \
   V(RegExpConstructResult)                    \
   V(TransitionElementsKind)                   \
   V(AllocateHeapNumber)                       \
@@ -48,6 +52,7 @@ class PlatformInterfaceDescriptor;
   V(BinaryOp)                                 \
   V(BinaryOpWithAllocationSite)               \
   V(StringAdd)                                \
+  V(StringCompare)                            \
   V(Keyed)                                    \
   V(Named)                                    \
   V(CallHandler)                              \
@@ -263,18 +268,40 @@ class StoreTransitionDescriptor : public StoreDescriptor {
     kParameterCount
   };
 
-  // MapRegister() is no_reg on ia32, instead it's on the stack.
   static const Register MapRegister();
 };
 
 
-class InstanceofDescriptor : public CallInterfaceDescriptor {
+class VectorStoreTransitionDescriptor : public StoreDescriptor {
  public:
-  DECLARE_DESCRIPTOR(InstanceofDescriptor, CallInterfaceDescriptor)
+  DECLARE_DESCRIPTOR_WITH_CUSTOM_FUNCTION_TYPE(VectorStoreTransitionDescriptor,
+                                               StoreDescriptor)
+
+  // Extends StoreDescriptor with Map parameter.
+  enum ParameterIndices {
+    kReceiverIndex,
+    kNameIndex,
+    kValueIndex,
+    kSlotIndex,
+    kVectorIndex,
+    kMapIndex,
+    kParameterCount
+  };
+
+  // These registers are no_reg for ia32, using the stack instead.
+  static const Register SlotRegister();
+  static const Register VectorRegister();
+  static const Register MapRegister();
+};
+
+
+class InstanceOfDescriptor final : public CallInterfaceDescriptor {
+ public:
+  DECLARE_DESCRIPTOR(InstanceOfDescriptor, CallInterfaceDescriptor)
 
   enum ParameterIndices { kLeftIndex, kRightIndex, kParameterCount };
-  static const Register left();
-  static const Register right();
+  static const Register LeftRegister();
+  static const Register RightRegister();
 };
 
 
@@ -340,6 +367,16 @@ class ToNumberDescriptor : public CallInterfaceDescriptor {
 };
 
 
+class ToStringDescriptor : public CallInterfaceDescriptor {
+ public:
+  enum ParameterIndices { kReceiverIndex };
+
+  DECLARE_DESCRIPTOR(ToStringDescriptor, CallInterfaceDescriptor)
+
+  static const Register ReceiverRegister();
+};
+
+
 class ToObjectDescriptor : public CallInterfaceDescriptor {
  public:
   enum ParameterIndices { kReceiverIndex };
@@ -392,6 +429,13 @@ class CreateWeakCellDescriptor : public CallInterfaceDescriptor {
   };
 
   DECLARE_DESCRIPTOR_WITH_CUSTOM_FUNCTION_TYPE(CreateWeakCellDescriptor,
+                                               CallInterfaceDescriptor)
+};
+
+
+class CallTrampolineDescriptor : public CallInterfaceDescriptor {
+ public:
+  DECLARE_DESCRIPTOR_WITH_CUSTOM_FUNCTION_TYPE(CallTrampolineDescriptor,
                                                CallInterfaceDescriptor)
 };
 
@@ -527,6 +571,16 @@ class StringAddDescriptor : public CallInterfaceDescriptor {
 };
 
 
+class StringCompareDescriptor : public CallInterfaceDescriptor {
+ public:
+  DECLARE_DESCRIPTOR(StringCompareDescriptor, CallInterfaceDescriptor)
+
+  enum ParameterIndices { kLeftIndex, kRightIndex, kParameterCount };
+  static const Register LeftRegister();
+  static const Register RightRegister();
+};
+
+
 class KeyedDescriptor : public CallInterfaceDescriptor {
  public:
   DECLARE_DESCRIPTOR(KeyedDescriptor, CallInterfaceDescriptor)
@@ -637,6 +691,12 @@ class GrowArrayElementsDescriptor : public CallInterfaceDescriptor {
   enum RegisterInfo { kObjectIndex, kKeyIndex };
   static const Register ObjectRegister();
   static const Register KeyRegister();
+};
+
+
+class PushArgsAndCallDescriptor : public CallInterfaceDescriptor {
+ public:
+  DECLARE_DESCRIPTOR(PushArgsAndCallDescriptor, CallInterfaceDescriptor)
 };
 
 #undef DECLARE_DESCRIPTOR

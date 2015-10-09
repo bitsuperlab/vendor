@@ -2,27 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/flags.h"
+
 #include <cctype>
 #include <cstdlib>
 #include <sstream>
 
-#include "src/v8.h"
-
+#include "src/allocation.h"
 #include "src/assembler.h"
 #include "src/base/functional.h"
 #include "src/base/platform/platform.h"
+#include "src/list-inl.h"
 #include "src/ostreams.h"
+#include "src/utils.h"
 
 namespace v8 {
 namespace internal {
 
 // Define all of our flags.
 #define FLAG_MODE_DEFINE
-#include "src/flag-definitions.h"  // NOLINT
+#include "src/flag-definitions.h"  // NOLINT(build/include)
 
 // Define all of our flags default values.
 #define FLAG_MODE_DEFINE_DEFAULTS
-#include "src/flag-definitions.h"  // NOLINT
+#include "src/flag-definitions.h"  // NOLINT(build/include)
 
 namespace {
 
@@ -161,7 +164,7 @@ struct Flag {
 
 Flag flags[] = {
 #define FLAG_MODE_META
-#include "src/flag-definitions.h"
+#include "src/flag-definitions.h"  // NOLINT(build/include)
 };
 
 const size_t num_flags = sizeof(flags) / sizeof(*flags);
@@ -517,23 +520,8 @@ void FlagList::ResetAllFlags() {
 // static
 void FlagList::PrintHelp() {
   CpuFeatures::Probe(false);
-  CpuFeatures::PrintTarget();
-  CpuFeatures::PrintFeatures();
-
   OFStream os(stdout);
-  os << "Usage:\n"
-     << "  shell [options] -e string\n"
-     << "    execute string in V8\n"
-     << "  shell [options] file1 file2 ... filek\n"
-     << "    run JavaScript scripts in file1, file2, ..., filek\n"
-     << "  shell [options]\n"
-     << "  shell [options] --shell [file1 file2 ... filek]\n"
-     << "    run an interactive JavaScript shell\n"
-     << "  d8 [options] file1 file2 ... filek\n"
-     << "  d8 [options]\n"
-     << "  d8 [options] --shell [file1 file2 ... filek]\n"
-     << "    run the new debugging shell\n\n"
-     << "Options:\n";
+  os << "Options:\n";
   for (size_t i = 0; i < num_flags; ++i) {
     Flag* f = &flags[i];
     os << "  --" << f->name() << " (" << f->comment() << ")\n"
@@ -567,7 +555,7 @@ void ComputeFlagListHash() {
 // static
 void FlagList::EnforceFlagImplications() {
 #define FLAG_MODE_DEFINE_IMPLICATIONS
-#include "src/flag-definitions.h"
+#include "src/flag-definitions.h"  // NOLINT(build/include)
 #undef FLAG_MODE_DEFINE_IMPLICATIONS
   ComputeFlagListHash();
 }

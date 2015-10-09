@@ -195,6 +195,9 @@
     <ClInclude Include="src\assert-scope.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\ast-expression-visitor.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\ast-literal-reindexer.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -205,6 +208,9 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\ast.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\atomic-utils.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\background-parsing-task.h">
@@ -378,9 +384,6 @@
     <ClInclude Include="src\code-stubs.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\code.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
     <ClInclude Include="src\codegen.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -409,6 +412,9 @@
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
     <ClInclude Include="src\compiler\basic-block-instrumentor.h">
+      <Filter>Source Files\compiler</Filter>
+    </ClInclude>
+    <ClInclude Include="src\compiler\bytecode-graph-builder.h">
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
     <ClInclude Include="src\compiler\change-lowering.h">
@@ -537,6 +543,9 @@
     <ClInclude Include="src\compiler\linkage.h">
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
+    <ClInclude Include="src\compiler\live-range-separator.h">
+      <Filter>Source Files\compiler</Filter>
+    </ClInclude>
     <ClInclude Include="src\compiler\liveness-analyzer.h">
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
@@ -600,9 +609,6 @@
     <ClInclude Include="src\compiler\ppc\instruction-codes-ppc.h">
       <Filter>Source Files\compiler\ppc</Filter>
     </ClInclude>
-    <ClInclude Include="src\compiler\preprocess-live-ranges.h">
-      <Filter>Source Files\compiler</Filter>
-    </ClInclude>
     <ClInclude Include="src\compiler\raw-machine-assembler.h">
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
@@ -664,6 +670,9 @@
       <Filter>Source Files\compiler</Filter>
     </ClInclude>
     <ClInclude Include="src\context-measure.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\contexts-inl.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\contexts.h">
@@ -819,6 +828,9 @@
     <ClInclude Include="src\heap-snapshot-generator.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\heap\array-buffer-tracker.h">
+      <Filter>Source Files\heap</Filter>
+    </ClInclude>
     <ClInclude Include="src\heap\gc-idle-time-handler.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
@@ -831,10 +843,10 @@
     <ClInclude Include="src\heap\heap.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
-    <ClInclude Include="src\heap\identity-map.h">
+    <ClInclude Include="src\heap\incremental-marking-inl.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
-    <ClInclude Include="src\heap\incremental-marking-inl.h">
+    <ClInclude Include="src\heap\incremental-marking-job.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
     <ClInclude Include="src\heap\incremental-marking.h">
@@ -849,10 +861,22 @@
     <ClInclude Include="src\heap\memory-reducer.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
+    <ClInclude Include="src\heap\object-stats.h">
+      <Filter>Source Files\heap</Filter>
+    </ClInclude>
     <ClInclude Include="src\heap\objects-visiting-inl.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
     <ClInclude Include="src\heap\objects-visiting.h">
+      <Filter>Source Files\heap</Filter>
+    </ClInclude>
+    <ClInclude Include="src\heap\scavenger-inl.h">
+      <Filter>Source Files\heap</Filter>
+    </ClInclude>
+    <ClInclude Include="src\heap\scavenger.h">
+      <Filter>Source Files\heap</Filter>
+    </ClInclude>
+    <ClInclude Include="src\heap\slots-buffer.h">
       <Filter>Source Files\heap</Filter>
     </ClInclude>
     <ClInclude Include="src\heap\spaces-inl.h">
@@ -1005,10 +1029,19 @@
     <ClInclude Include="src\icu_util.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\identity-map.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\interface-descriptors.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\interpreter\bytecode-array-builder.h">
+      <Filter>Source Files\interpreter</Filter>
+    </ClInclude>
+    <ClInclude Include="src\interpreter\bytecode-array-iterator.h">
+      <Filter>Source Files\interpreter</Filter>
+    </ClInclude>
+    <ClInclude Include="src\interpreter\bytecode-generator.h">
       <Filter>Source Files\interpreter</Filter>
     </ClInclude>
     <ClInclude Include="src\interpreter\bytecodes.h">
@@ -1016,6 +1049,9 @@
     </ClInclude>
     <ClInclude Include="src\interpreter\interpreter.h">
       <Filter>Source Files\interpreter</Filter>
+    </ClInclude>
+    <ClInclude Include="src\isolate-inl.h">
+      <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\isolate.h">
       <Filter>Source Files</Filter>
@@ -1311,6 +1347,12 @@
     <ClInclude Include="src\types.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\typing-asm.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\typing-reset.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\typing.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -1318,6 +1360,12 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\unbound-queue.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\unicode-cache-inl.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\unicode-cache.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\unicode-decoder.h">
@@ -1425,6 +1473,9 @@
     <ClInclude Include="src\zone-containers.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\zone-type-cache.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\zone.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -1455,6 +1506,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\assert-scope.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ast-expression-visitor.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\ast-literal-reindexer.cc">
@@ -1610,6 +1664,9 @@
     <ClCompile Include="src\compiler\basic-block-instrumentor.cc">
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
+    <ClCompile Include="src\compiler\bytecode-graph-builder.cc">
+      <Filter>Source Files\compiler</Filter>
+    </ClCompile>
     <ClCompile Include="src\compiler\c-linkage.cc">
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
@@ -1647,6 +1704,9 @@
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
     <ClCompile Include="src\compiler\frame-states.cc">
+      <Filter>Source Files\compiler</Filter>
+    </ClCompile>
+    <ClCompile Include="src\compiler\frame.cc">
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
     <ClCompile Include="src\compiler\gap-resolver.cc">
@@ -1727,6 +1787,9 @@
     <ClCompile Include="src\compiler\linkage.cc">
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
+    <ClCompile Include="src\compiler\live-range-separator.cc">
+      <Filter>Source Files\compiler</Filter>
+    </ClCompile>
     <ClCompile Include="src\compiler\liveness-analyzer.cc">
       <Filter>Source Files\compiler</Filter>
     </ClCompile>
@@ -1789,9 +1852,6 @@
     </ClCompile>
     <ClCompile Include="src\compiler\ppc\instruction-selector-ppc.cc">
       <Filter>Source Files\compiler\ppc</Filter>
-    </ClCompile>
-    <ClCompile Include="src\compiler\preprocess-live-ranges.cc">
-      <Filter>Source Files\compiler</Filter>
     </ClCompile>
     <ClCompile Include="src\compiler\raw-machine-assembler.cc">
       <Filter>Source Files\compiler</Filter>
@@ -1982,6 +2042,9 @@
     <ClCompile Include="src\gen\code-stub-libraries.cc">
       <Filter>Source Files\gen</Filter>
     </ClCompile>
+    <ClCompile Include="src\gen\experimental-extras-libraries.cc">
+      <Filter>Source Files\gen</Filter>
+    </ClCompile>
     <ClCompile Include="src\gen\experimental-libraries.cc">
       <Filter>Source Files\gen</Filter>
     </ClCompile>
@@ -2003,6 +2066,9 @@
     <ClCompile Include="src\heap-snapshot-generator.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\heap\array-buffer-tracker.cc">
+      <Filter>Source Files\heap</Filter>
+    </ClCompile>
     <ClCompile Include="src\heap\gc-idle-time-handler.cc">
       <Filter>Source Files\heap</Filter>
     </ClCompile>
@@ -2012,7 +2078,7 @@
     <ClCompile Include="src\heap\heap.cc">
       <Filter>Source Files\heap</Filter>
     </ClCompile>
-    <ClCompile Include="src\heap\identity-map.cc">
+    <ClCompile Include="src\heap\incremental-marking-job.cc">
       <Filter>Source Files\heap</Filter>
     </ClCompile>
     <ClCompile Include="src\heap\incremental-marking.cc">
@@ -2024,7 +2090,16 @@
     <ClCompile Include="src\heap\memory-reducer.cc">
       <Filter>Source Files\heap</Filter>
     </ClCompile>
+    <ClCompile Include="src\heap\object-stats.cc">
+      <Filter>Source Files\heap</Filter>
+    </ClCompile>
     <ClCompile Include="src\heap\objects-visiting.cc">
+      <Filter>Source Files\heap</Filter>
+    </ClCompile>
+    <ClCompile Include="src\heap\scavenger.cc">
+      <Filter>Source Files\heap</Filter>
+    </ClCompile>
+    <ClCompile Include="src\heap\slots-buffer.cc">
       <Filter>Source Files\heap</Filter>
     </ClCompile>
     <ClCompile Include="src\heap\spaces.cc">
@@ -2234,10 +2309,19 @@
     <ClCompile Include="src\icu_util.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\identity-map.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\interface-descriptors.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\interpreter\bytecode-array-builder.cc">
+      <Filter>Source Files\interpreter</Filter>
+    </ClCompile>
+    <ClCompile Include="src\interpreter\bytecode-array-iterator.cc">
+      <Filter>Source Files\interpreter</Filter>
+    </ClCompile>
+    <ClCompile Include="src\interpreter\bytecode-generator.cc">
       <Filter>Source Files\interpreter</Filter>
     </ClCompile>
     <ClCompile Include="src\interpreter\bytecodes.cc">
@@ -2465,6 +2549,9 @@
     <ClCompile Include="src\runtime\runtime-observe.cc">
       <Filter>Source Files\runtime</Filter>
     </ClCompile>
+    <ClCompile Include="src\runtime\runtime-operators.cc">
+      <Filter>Source Files\runtime</Filter>
+    </ClCompile>
     <ClCompile Include="src\runtime\runtime-proxy.cc">
       <Filter>Source Files\runtime</Filter>
     </ClCompile>
@@ -2513,6 +2600,9 @@
     <ClCompile Include="src\scopes.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\snapshot\natives-common.cc">
+      <Filter>Source Files\snapshot</Filter>
+    </ClCompile>
     <ClCompile Include="src\snapshot\serialize.cc">
       <Filter>Source Files\snapshot</Filter>
     </ClCompile>
@@ -2529,9 +2619,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\string-builder.cc">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\string-search.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\string-stream.cc">
@@ -2559,6 +2646,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\types.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\typing-asm.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\typing-reset.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\typing.cc">

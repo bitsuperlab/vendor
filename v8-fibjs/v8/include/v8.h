@@ -19,8 +19,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "v8-version.h"
-#include "v8config.h"
+#include "v8-version.h"  // NOLINT(build/include)
+#include "v8config.h"    // NOLINT(build/include)
 
 // We reserve the V8_* prefix for macros defined in V8 public API and
 // assume there are no name conflicts with the embedder's code.
@@ -112,8 +112,8 @@ class MaybeLocal;
 template <class T> class Eternal;
 template<class T> class NonCopyablePersistentTraits;
 template<class T> class PersistentBase;
-template<class T,
-         class M = NonCopyablePersistentTraits<T> > class Persistent;
+template <class T, class M = NonCopyablePersistentTraits<T> >
+class Persistent;
 template <class T>
 class Global;
 template<class K, class V, class T> class PersistentValueMap;
@@ -815,7 +815,7 @@ class Global : public PersistentBase<T> {
   /**
    * Move constructor.
    */
-  V8_INLINE Global(Global&& other) : PersistentBase<T>(other.val_) {
+  V8_INLINE Global(Global&& other) : PersistentBase<T>(other.val_) {  // NOLINT
     other.val_ = nullptr;
   }
   V8_INLINE ~Global() { this->Reset(); }
@@ -823,7 +823,7 @@ class Global : public PersistentBase<T> {
    * Move via assignment.
    */
   template <class S>
-  V8_INLINE Global& operator=(Global<S>&& rhs) {
+  V8_INLINE Global& operator=(Global<S>&& rhs) {  // NOLINT
     TYPE_CHECK(T, S);
     if (this != &rhs) {
       this->Reset();
@@ -835,7 +835,7 @@ class Global : public PersistentBase<T> {
   /**
    * Pass allows returning uniques from functions, etc.
    */
-  Global Pass() { return static_cast<Global&&>(*this); }
+  Global Pass() { return static_cast<Global&&>(*this); }  // NOLINT
 
   /*
    * For compatibility with Chromium's base::Bind (base::Passed).
@@ -4951,16 +4951,19 @@ typedef bool (*AllowCodeGenerationFromStringsCallback)(Local<Context> context);
 // --- Garbage Collection Callbacks ---
 
 /**
- * Applications can register callback functions which will be called
- * before and after a garbage collection.  Allocations are not
- * allowed in the callback functions, you therefore cannot manipulate
- * objects (set or delete properties for example) since it is possible
- * such operations will result in the allocation of objects.
+ * Applications can register callback functions which will be called before and
+ * after certain garbage collection operations.  Allocations are not allowed in
+ * the callback functions, you therefore cannot manipulate objects (set or
+ * delete properties for example) since it is possible such operations will
+ * result in the allocation of objects.
  */
 enum GCType {
   kGCTypeScavenge = 1 << 0,
   kGCTypeMarkSweepCompact = 1 << 1,
-  kGCTypeAll = kGCTypeScavenge | kGCTypeMarkSweepCompact
+  kGCTypeIncrementalMarking = 1 << 2,
+  kGCTypeProcessWeakCallbacks = 1 << 3,
+  kGCTypeAll = kGCTypeScavenge | kGCTypeMarkSweepCompact |
+               kGCTypeIncrementalMarking | kGCTypeProcessWeakCallbacks
 };
 
 enum GCCallbackFlags {
@@ -4970,8 +4973,13 @@ enum GCCallbackFlags {
   kGCCallbackFlagSynchronousPhantomCallbackProcessing = 1 << 3
 };
 
-typedef void (*GCPrologueCallback)(GCType type, GCCallbackFlags flags);
-typedef void (*GCEpilogueCallback)(GCType type, GCCallbackFlags flags);
+V8_DEPRECATE_SOON("Use GCCallBack instead",
+                  typedef void (*GCPrologueCallback)(GCType type,
+                                                     GCCallbackFlags flags));
+V8_DEPRECATE_SOON("Use GCCallBack instead",
+                  typedef void (*GCEpilogueCallback)(GCType type,
+                                                     GCCallbackFlags flags));
+typedef void (*GCCallback)(GCType type, GCCallbackFlags flags);
 
 typedef void (*InterruptCallback)(Isolate* isolate, void* data);
 
@@ -5547,12 +5555,16 @@ class V8_EXPORT Isolate {
   template<typename T, typename S>
   void SetReference(const Persistent<T>& parent, const Persistent<S>& child);
 
-  typedef void (*GCPrologueCallback)(Isolate* isolate,
-                                     GCType type,
-                                     GCCallbackFlags flags);
-  typedef void (*GCEpilogueCallback)(Isolate* isolate,
-                                     GCType type,
-                                     GCCallbackFlags flags);
+  V8_DEPRECATE_SOON("Use GCCallBack instead",
+                    typedef void (*GCPrologueCallback)(Isolate* isolate,
+                                                       GCType type,
+                                                       GCCallbackFlags flags));
+  V8_DEPRECATE_SOON("Use GCCallBack instead",
+                    typedef void (*GCEpilogueCallback)(Isolate* isolate,
+                                                       GCType type,
+                                                       GCCallbackFlags flags));
+  typedef void (*GCCallback)(Isolate* isolate, GCType type,
+                             GCCallbackFlags flags);
 
   /**
    * Enables the host application to receive a notification before a
@@ -5563,14 +5575,14 @@ class V8_EXPORT Isolate {
    * not possible to register the same callback function two times with
    * different GCType filters.
    */
-  void AddGCPrologueCallback(
-      GCPrologueCallback callback, GCType gc_type_filter = kGCTypeAll);
+  void AddGCPrologueCallback(GCCallback callback,
+                             GCType gc_type_filter = kGCTypeAll);
 
   /**
    * This function removes callback which was installed by
    * AddGCPrologueCallback function.
    */
-  void RemoveGCPrologueCallback(GCPrologueCallback callback);
+  void RemoveGCPrologueCallback(GCCallback callback);
 
   /**
    * Enables the host application to receive a notification after a
@@ -5581,15 +5593,14 @@ class V8_EXPORT Isolate {
    * not possible to register the same callback function two times with
    * different GCType filters.
    */
-  void AddGCEpilogueCallback(
-      GCEpilogueCallback callback, GCType gc_type_filter = kGCTypeAll);
+  void AddGCEpilogueCallback(GCCallback callback,
+                             GCType gc_type_filter = kGCTypeAll);
 
   /**
    * This function removes callback which was installed by
    * AddGCEpilogueCallback function.
    */
-  void RemoveGCEpilogueCallback(GCEpilogueCallback callback);
-
+  void RemoveGCEpilogueCallback(GCCallback callback);
 
   /**
    * Forcefully terminate the current thread of JavaScript execution
@@ -6046,7 +6057,7 @@ class V8_EXPORT V8 {
    */
   static V8_DEPRECATE_SOON(
       "Use isolate version",
-      void AddGCPrologueCallback(GCPrologueCallback callback,
+      void AddGCPrologueCallback(GCCallback callback,
                                  GCType gc_type_filter = kGCTypeAll));
 
   /**
@@ -6055,7 +6066,7 @@ class V8_EXPORT V8 {
    */
   V8_INLINE static V8_DEPRECATE_SOON(
       "Use isolate version",
-      void RemoveGCPrologueCallback(GCPrologueCallback callback));
+      void RemoveGCPrologueCallback(GCCallback callback));
 
   /**
    * Enables the host application to receive a notification after a
@@ -6069,7 +6080,7 @@ class V8_EXPORT V8 {
    */
   static V8_DEPRECATE_SOON(
       "Use isolate version",
-      void AddGCEpilogueCallback(GCEpilogueCallback callback,
+      void AddGCEpilogueCallback(GCCallback callback,
                                  GCType gc_type_filter = kGCTypeAll));
 
   /**
@@ -6078,7 +6089,7 @@ class V8_EXPORT V8 {
    */
   V8_INLINE static V8_DEPRECATE_SOON(
       "Use isolate version",
-      void RemoveGCEpilogueCallback(GCEpilogueCallback callback));
+      void RemoveGCEpilogueCallback(GCCallback callback));
 
   /**
    * Enables the host application to provide a mechanism to be notified
@@ -6937,7 +6948,7 @@ class Internals {
   static const int kJSObjectHeaderSize = 3 * kApiPointerSize;
   static const int kFixedArrayHeaderSize = 2 * kApiPointerSize;
   static const int kContextHeaderSize = 2 * kApiPointerSize;
-  static const int kContextEmbedderDataIndex = 27;
+  static const int kContextEmbedderDataIndex = 5;
   static const int kFullStringRepresentationMask = 0x07;
   static const int kStringEncodingMask = 0x4;
   static const int kExternalTwoByteRepresentationTag = 0x02;
@@ -6970,7 +6981,7 @@ class Internals {
   static const int kNodeIsIndependentShift = 3;
   static const int kNodeIsPartiallyDependentShift = 4;
 
-  static const int kJSObjectType = 0xb6;
+  static const int kJSObjectType = 0xb7;
   static const int kFirstNonstringType = 0x80;
   static const int kOddballType = 0x83;
   static const int kForeignType = 0x87;
@@ -8257,17 +8268,17 @@ void V8::SetFatalErrorHandler(FatalErrorCallback callback) {
 }
 
 
-void V8::RemoveGCPrologueCallback(GCPrologueCallback callback) {
+void V8::RemoveGCPrologueCallback(GCCallback callback) {
   Isolate* isolate = Isolate::GetCurrent();
   isolate->RemoveGCPrologueCallback(
-      reinterpret_cast<v8::Isolate::GCPrologueCallback>(callback));
+      reinterpret_cast<v8::Isolate::GCCallback>(callback));
 }
 
 
-void V8::RemoveGCEpilogueCallback(GCEpilogueCallback callback) {
+void V8::RemoveGCEpilogueCallback(GCCallback callback) {
   Isolate* isolate = Isolate::GetCurrent();
   isolate->RemoveGCEpilogueCallback(
-      reinterpret_cast<v8::Isolate::GCEpilogueCallback>(callback));
+      reinterpret_cast<v8::Isolate::GCCallback>(callback));
 }
 
 

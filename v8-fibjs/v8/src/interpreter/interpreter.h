@@ -9,12 +9,15 @@
 // Do not include anything from src/interpreter other than
 // src/interpreter/bytecodes.h here!
 #include "src/base/macros.h"
+#include "src/builtins.h"
 #include "src/interpreter/bytecodes.h"
+#include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
 
 class Isolate;
+class Callable;
 class CompilationInfo;
 
 namespace compiler {
@@ -36,12 +39,26 @@ class Interpreter {
   // Initializes the interpreter.
   void Initialize();
 
+  // Generate bytecode for |info|.
+  static bool MakeBytecode(CompilationInfo* info);
+
  private:
 // Bytecode handler generator functions.
 #define DECLARE_BYTECODE_HANDLER_GENERATOR(Name, ...) \
   void Do##Name(compiler::InterpreterAssembler* assembler);
   BYTECODE_LIST(DECLARE_BYTECODE_HANDLER_GENERATOR)
 #undef DECLARE_BYTECODE_HANDLER_GENERATOR
+
+  // Generates code to perform the binary operations via |function_id|.
+  void DoBinaryOp(Runtime::FunctionId function_id,
+                  compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a property load via |ic|.
+  void DoPropertyLoadIC(Callable ic, compiler::InterpreterAssembler* assembler);
+
+  // Generates code to perform a property store via |ic|.
+  void DoPropertyStoreIC(Callable ic,
+                         compiler::InterpreterAssembler* assembler);
 
   bool IsInterpreterTableInitialized(Handle<FixedArray> handler_table);
 

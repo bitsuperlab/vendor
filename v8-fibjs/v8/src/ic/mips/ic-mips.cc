@@ -446,8 +446,8 @@ void KeyedLoadIC::GenerateMegamorphic(MacroAssembler* masm,
 
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::LOAD_IC));
-  masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::LOAD_IC, flags, false, receiver, key, t0, t1, t2, t5);
+  masm->isolate()->stub_cache()->GenerateProbe(masm, Code::LOAD_IC, flags,
+                                               receiver, key, t0, t1, t2, t5);
   // Cache miss.
   GenerateMiss(masm);
 
@@ -685,7 +685,7 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
     // change the IC from any downstream misses, a dummy vector can be used.
     Register vector = VectorStoreICDescriptor::VectorRegister();
     Register slot = VectorStoreICDescriptor::SlotRegister();
-    DCHECK(!AreAliased(vector, slot, a3, t0, t1, t2));
+    DCHECK(!AreAliased(vector, slot, t1, t2, t4, t5));
     Handle<TypeFeedbackVector> dummy_vector =
         TypeFeedbackVector::DummyVector(masm->isolate());
     int slot_index = dummy_vector->GetIndex(
@@ -696,8 +696,8 @@ void KeyedStoreIC::GenerateMegamorphic(MacroAssembler* masm,
 
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::STORE_IC));
-  masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::STORE_IC, flags, false, receiver, key, a3, t0, t1, t2);
+  masm->isolate()->stub_cache()->GenerateProbe(masm, Code::STORE_IC, flags,
+                                               receiver, key, t1, t2, t4, t5);
   // Cache miss.
   __ Branch(&miss);
 
@@ -776,8 +776,8 @@ void StoreIC::GenerateMegamorphic(MacroAssembler* masm) {
   // Get the receiver from the stack and probe the stub cache.
   Code::Flags flags = Code::RemoveTypeAndHolderFromFlags(
       Code::ComputeHandlerFlags(Code::STORE_IC));
-  masm->isolate()->stub_cache()->GenerateProbe(
-      masm, Code::STORE_IC, flags, false, receiver, name, a3, t0, t1, t2);
+  masm->isolate()->stub_cache()->GenerateProbe(masm, Code::STORE_IC, flags,
+                                               receiver, name, a3, t0, t1, t2);
 
   // Cache miss: Jump to runtime.
   GenerateMiss(masm);
@@ -798,20 +798,22 @@ void StoreIC::GenerateNormal(MacroAssembler* masm) {
   Register receiver = StoreDescriptor::ReceiverRegister();
   Register name = StoreDescriptor::NameRegister();
   Register value = StoreDescriptor::ValueRegister();
-  Register dictionary = a3;
+  Register dictionary = t1;
   DCHECK(receiver.is(a1));
   DCHECK(name.is(a2));
   DCHECK(value.is(a0));
+  DCHECK(VectorStoreICDescriptor::VectorRegister().is(a3));
+  DCHECK(VectorStoreICDescriptor::SlotRegister().is(t0));
 
   __ lw(dictionary, FieldMemOperand(receiver, JSObject::kPropertiesOffset));
 
-  GenerateDictionaryStore(masm, &miss, dictionary, name, value, t0, t1);
+  GenerateDictionaryStore(masm, &miss, dictionary, name, value, t2, t5);
   Counters* counters = masm->isolate()->counters();
-  __ IncrementCounter(counters->store_normal_hit(), 1, t0, t1);
+  __ IncrementCounter(counters->store_normal_hit(), 1, t2, t5);
   __ Ret();
 
   __ bind(&miss);
-  __ IncrementCounter(counters->store_normal_miss(), 1, t0, t1);
+  __ IncrementCounter(counters->store_normal_miss(), 1, t2, t5);
   GenerateMiss(masm);
 }
 

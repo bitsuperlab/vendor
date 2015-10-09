@@ -33,6 +33,7 @@
 #if V8_TARGET_ARCH_ARM64
 
 #define ARM64_DEFINE_REG_STATICS
+#include "src/arm64/assembler-arm64.h"
 
 #include "src/arm64/assembler-arm64-inl.h"
 #include "src/arm64/frames-arm64.h"
@@ -56,7 +57,8 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   // Probe for runtime features
   base::CPU cpu;
   if (cpu.implementer() == base::CPU::NVIDIA &&
-      cpu.variant() == base::CPU::NVIDIA_DENVER) {
+      cpu.variant() == base::CPU::NVIDIA_DENVER &&
+      cpu.part() <= base::CPU::NVIDIA_DENVER_V10) {
     supported_ |= 1u << COHERENT_CACHE;
   }
 }

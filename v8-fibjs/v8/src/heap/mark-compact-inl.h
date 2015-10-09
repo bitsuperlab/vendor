@@ -6,20 +6,28 @@
 #define V8_HEAP_MARK_COMPACT_INL_H_
 
 #include "src/heap/mark-compact.h"
+#include "src/heap/slots-buffer.h"
 #include "src/isolate.h"
-
 
 namespace v8 {
 namespace internal {
 
+void MarkCompactCollector::PushBlack(HeapObject* obj) {
+  DCHECK(Marking::IsBlack(Marking::MarkBitFrom(obj)));
+  if (marking_deque_.Push(obj)) {
+    MemoryChunk::IncrementLiveBytesFromGC(obj, obj->Size());
+  } else {
+    Marking::BlackToGrey(obj);
+  }
+}
 
-void MarkCompactCollector::SetFlags(int flags) {
-  reduce_memory_footprint_ = ((flags & Heap::kReduceMemoryFootprintMask) != 0);
-  abort_incremental_marking_ =
-      ((flags & Heap::kAbortIncrementalMarkingMask) != 0);
-  finalize_incremental_marking_ =
-      ((flags & Heap::kFinalizeIncrementalMarkingMask) != 0);
-  DCHECK(!finalize_incremental_marking_ || !abort_incremental_marking_);
+
+void MarkCompactCollector::UnshiftBlack(HeapObject* obj) {
+  DCHECK(Marking::IsBlack(Marking::MarkBitFrom(obj)));
+  if (!marking_deque_.Unshift(obj)) {
+    MemoryChunk::IncrementLiveBytesFromGC(obj, -obj->Size());
+    Marking::BlackToGrey(obj);
+  }
 }
 
 
@@ -27,9 +35,8 @@ void MarkCompactCollector::MarkObject(HeapObject* obj, MarkBit mark_bit) {
   DCHECK(Marking::MarkBitFrom(obj) == mark_bit);
   if (Marking::IsWhite(mark_bit)) {
     Marking::WhiteToBlack(mark_bit);
-    MemoryChunk::IncrementLiveBytesFromGC(obj, obj->Size());
     DCHECK(obj->GetIsolate()->heap()->Contains(obj));
-    marking_deque_.PushBlack(obj);
+    PushBlack(obj);
   }
 }
 
@@ -50,15 +57,27 @@ bool MarkCompactCollector::IsMarked(Object* obj) {
 
 
 void MarkCompactCollector::RecordSlot(HeapObject* object, Object** slot,
-                                      Object* target,
-                                      SlotsBuffer::AdditionMode mode) {
+                                      Object* target) {
   Page* target_page = Page::FromAddress(reinterpret_cast<Address>(target));
   if (target_page->IsEvacuationCandidate() &&
       !ShouldSkipEvacuationSlotRecording(object)) {
-    if (!SlotsBuffer::AddTo(&slots_buffer_allocator_,
-                            target_page->slots_buffer_address(), slot, mode)) {
+    if (!SlotsBuffer::AddTo(slots_buffer_allocator_,
+                            target_page->slots_buffer_address(), slot,
+                            SlotsBuffer::FAIL_ON_OVERFLOW)) {
       EvictPopularEvacuationCandidate(target_page);
     }
+  }
+}
+
+
+void MarkCompactCollector::ForceRecordSlot(HeapObject* object, Object** slot,
+                                           Object* target) {
+  Page* target_page = Page::FromAddress(reinterpret_cast<Address>(target));
+  if (target_page->IsEvacuationCandidate() &&
+      !ShouldSkipEvacuationSlotRecording(object)) {
+    CHECK(SlotsBuffer::AddTo(slots_buffer_allocator_,
+                             target_page->slots_buffer_address(), slot,
+                             SlotsBuffer::IGNORE_OVERFLOW));
   }
 }
 

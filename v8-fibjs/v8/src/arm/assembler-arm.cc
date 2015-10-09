@@ -38,6 +38,8 @@
 // modified significantly by Google Inc.
 // Copyright 2012 the V8 project authors. All rights reserved.
 
+#include "src/arm/assembler-arm.h"
+
 #if V8_TARGET_ARCH_ARM
 
 #include "src/arm/assembler-arm-inl.h"
@@ -130,7 +132,8 @@ void CpuFeatures::ProbeImpl(bool cross_compile) {
   if (FLAG_enable_32dregs && cpu.has_vfp3_d32()) supported_ |= 1u << VFP32DREGS;
 
   if (cpu.implementer() == base::CPU::NVIDIA &&
-      cpu.variant() == base::CPU::NVIDIA_DENVER) {
+      cpu.variant() == base::CPU::NVIDIA_DENVER &&
+      cpu.part() <= base::CPU::NVIDIA_DENVER_V10) {
     supported_ |= 1u << COHERENT_CACHE;
   }
 #endif
@@ -451,6 +454,8 @@ const Instr kLdrStrInstrTypeMask = 0xffff0000;
 Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
     : AssemblerBase(isolate, buffer, buffer_size),
       recorded_ast_id_(TypeFeedbackId::None()),
+      pending_32_bit_constants_(&pending_32_bit_constants_buffer_[0]),
+      pending_64_bit_constants_(&pending_64_bit_constants_buffer_[0]),
       constant_pool_builder_(kLdrMaxReachBits, kVldrMaxReachBits),
       positions_recorder_(this) {
   reloc_info_writer.Reposition(buffer_ + buffer_size_, pc_);
@@ -468,6 +473,12 @@ Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
 
 Assembler::~Assembler() {
   DCHECK(const_pool_blocked_nesting_ == 0);
+  if (pending_32_bit_constants_ != &pending_32_bit_constants_buffer_[0]) {
+    delete[] pending_32_bit_constants_;
+  }
+  if (pending_64_bit_constants_ != &pending_64_bit_constants_buffer_[0]) {
+    delete[] pending_64_bit_constants_;
+  }
 }
 
 
@@ -3667,6 +3678,15 @@ ConstantPoolEntry::Access Assembler::ConstantPoolAddEntry(int position,
     DCHECK(num_pending_32_bit_constants_ < kMaxNumPending32Constants);
     if (num_pending_32_bit_constants_ == 0) {
       first_const_pool_32_use_ = position;
+    } else if (num_pending_32_bit_constants_ == kMinNumPendingConstants &&
+               pending_32_bit_constants_ ==
+                   &pending_32_bit_constants_buffer_[0]) {
+      // Inline buffer is full, switch to dynamically allocated buffer.
+      pending_32_bit_constants_ =
+          new ConstantPoolEntry[kMaxNumPending32Constants];
+      std::copy(&pending_32_bit_constants_buffer_[0],
+                &pending_32_bit_constants_buffer_[kMinNumPendingConstants],
+                &pending_32_bit_constants_[0]);
     }
     ConstantPoolEntry entry(position, value, sharing_ok);
     pending_32_bit_constants_[num_pending_32_bit_constants_++] = entry;
@@ -3687,6 +3707,15 @@ ConstantPoolEntry::Access Assembler::ConstantPoolAddEntry(int position,
     DCHECK(num_pending_64_bit_constants_ < kMaxNumPending64Constants);
     if (num_pending_64_bit_constants_ == 0) {
       first_const_pool_64_use_ = position;
+    } else if (num_pending_64_bit_constants_ == kMinNumPendingConstants &&
+               pending_64_bit_constants_ ==
+                   &pending_64_bit_constants_buffer_[0]) {
+      // Inline buffer is full, switch to dynamically allocated buffer.
+      pending_64_bit_constants_ =
+          new ConstantPoolEntry[kMaxNumPending64Constants];
+      std::copy(&pending_64_bit_constants_buffer_[0],
+                &pending_64_bit_constants_buffer_[kMinNumPendingConstants],
+                &pending_64_bit_constants_[0]);
     }
     ConstantPoolEntry entry(position, value);
     pending_64_bit_constants_[num_pending_64_bit_constants_++] = entry;

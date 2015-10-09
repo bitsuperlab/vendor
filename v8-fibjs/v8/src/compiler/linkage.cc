@@ -5,6 +5,7 @@
 #include "src/code-stubs.h"
 #include "src/compiler.h"
 #include "src/compiler/common-operator.h"
+#include "src/compiler/frame.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/node.h"
 #include "src/compiler/osr.h"
@@ -170,11 +171,11 @@ CallDescriptor* Linkage::ComputeIncoming(Zone* zone, CompilationInfo* info) {
         info->isolate(), zone, descriptor, stub->GetStackParameterCount(),
         CallDescriptor::kNoFlags, Operator::kNoProperties);
   }
-  if (info->function() != NULL) {
+  if (info->has_literal()) {
     // If we already have the function literal, use the number of parameters
     // plus the receiver.
     return GetJSCallDescriptor(zone, info->is_osr(),
-                               1 + info->function()->parameter_count(),
+                               1 + info->literal()->parameter_count(),
                                CallDescriptor::kNoFlags);
   }
   if (!info->closure().is_null()) {
@@ -190,27 +191,21 @@ CallDescriptor* Linkage::ComputeIncoming(Zone* zone, CompilationInfo* info) {
 
 
 FrameOffset Linkage::GetFrameOffset(int spill_slot, Frame* frame) const {
-  if (frame->GetSpillSlotCount() > 0 || incoming_->IsJSFunctionCall() ||
-      incoming_->kind() == CallDescriptor::kCallAddress) {
-    int offset;
-    int register_save_area_size = frame->GetRegisterSaveAreaSize();
-    if (spill_slot >= 0) {
-      // Local or spill slot. Skip the frame pointer, function, and
-      // context in the fixed part of the frame.
-      offset = -(spill_slot + 1) * kPointerSize - register_save_area_size;
-    } else {
-      // Incoming parameter. Skip the return address.
-      offset = -(spill_slot + 1) * kPointerSize + kFPOnStackSize +
-               frame->PCOnStackSize();
-    }
+  bool has_frame = frame->GetSpillSlotCount() > 0 ||
+                   incoming_->IsJSFunctionCall() ||
+                   incoming_->kind() == CallDescriptor::kCallAddress;
+  const int offset =
+      (StandardFrameConstants::kFixedSlotCountAboveFp - spill_slot - 1) *
+      kPointerSize;
+  if (has_frame) {
     return FrameOffset::FromFramePointer(offset);
   } else {
     // No frame. Retrieve all parameters relative to stack pointer.
     DCHECK(spill_slot < 0);  // Must be a parameter.
-    int register_save_area_size = frame->GetRegisterSaveAreaSize();
-    int offset = register_save_area_size - (spill_slot + 1) * kPointerSize +
-                 frame->PCOnStackSize();
-    return FrameOffset::FromStackPointer(offset);
+    int offsetSpToFp =
+        kPointerSize * (StandardFrameConstants::kFixedSlotCountAboveFp -
+                        frame->GetTotalFrameSlotCount());
+    return FrameOffset::FromStackPointer(offset - offsetSpToFp);
   }
 }
 
@@ -223,17 +218,16 @@ int Linkage::FrameStateInputCount(Runtime::FunctionId function) {
   switch (function) {
     case Runtime::kAllocateInTargetSpace:
     case Runtime::kDateField:
-    case Runtime::kFinalizeClassDefinition:        // TODO(conradw): Is it safe?
     case Runtime::kDefineClassMethod:              // TODO(jarin): Is it safe?
     case Runtime::kDefineGetterPropertyUnchecked:  // TODO(jarin): Is it safe?
     case Runtime::kDefineSetterPropertyUnchecked:  // TODO(jarin): Is it safe?
+    case Runtime::kFinalizeClassDefinition:        // TODO(conradw): Is it safe?
     case Runtime::kForInDone:
     case Runtime::kForInStep:
     case Runtime::kGetOriginalConstructor:
-    case Runtime::kNewArguments:
     case Runtime::kNewClosure:
+    case Runtime::kNewClosure_Tenured:
     case Runtime::kNewFunctionContext:
-    case Runtime::kNewRestParamSlow:
     case Runtime::kPushBlockContext:
     case Runtime::kPushCatchContext:
     case Runtime::kReThrow:
@@ -244,12 +238,21 @@ int Linkage::FrameStateInputCount(Runtime::FunctionId function) {
     case Runtime::kTraceExit:
       return 0;
     case Runtime::kInlineArguments:
+    case Runtime::kInlineArgumentsLength:
+    case Runtime::kInlineCall:
     case Runtime::kInlineCallFunction:
     case Runtime::kInlineDefaultConstructorCallSuper:
     case Runtime::kInlineGetCallerJSFunction:
     case Runtime::kInlineGetPrototype:
     case Runtime::kInlineRegExpExec:
+    case Runtime::kInlineSubString:
+    case Runtime::kInlineToName:
+    case Runtime::kInlineToNumber:
     case Runtime::kInlineToObject:
+    case Runtime::kInlineToPrimitive_Number:
+    case Runtime::kInlineToPrimitive_String:
+    case Runtime::kInlineToPrimitive:
+    case Runtime::kInlineToString:
       return 1;
     case Runtime::kInlineDeoptimizeNow:
     case Runtime::kInlineThrowNotDateError:
@@ -280,7 +283,7 @@ bool CallDescriptor::UsesOnlyRegisters() const {
 
 CallDescriptor* Linkage::GetRuntimeCallDescriptor(
     Zone* zone, Runtime::FunctionId function_id, int js_parameter_count,
-    Operator::Properties properties) {
+    Operator::Properties properties, bool needs_frame_state) {
   const size_t function_count = 1;
   const size_t num_args_count = 1;
   const size_t context_count = 1;
@@ -323,9 +326,10 @@ CallDescriptor* Linkage::GetRuntimeCallDescriptor(
   locations.AddParam(regloc(kContextRegister));
   types.AddParam(kMachAnyTagged);
 
-  CallDescriptor::Flags flags = Linkage::FrameStateInputCount(function_id) > 0
-                                    ? CallDescriptor::kNeedsFrameState
-                                    : CallDescriptor::kNoFlags;
+  CallDescriptor::Flags flags =
+      needs_frame_state && (Linkage::FrameStateInputCount(function_id) > 0)
+          ? CallDescriptor::kNeedsFrameState
+          : CallDescriptor::kNoFlags;
 
   // The target for runtime calls is a code object.
   MachineType target_type = kMachAnyTagged;
@@ -392,21 +396,38 @@ CallDescriptor* Linkage::GetJSCallDescriptor(Zone* zone, bool is_osr,
 
 
 CallDescriptor* Linkage::GetInterpreterDispatchDescriptor(Zone* zone) {
-  MachineSignature::Builder types(zone, 0, 3);
-  LocationSignature::Builder locations(zone, 0, 3);
+  MachineSignature::Builder types(zone, 0, 6);
+  LocationSignature::Builder locations(zone, 0, 6);
 
   // Add registers for fixed parameters passed via interpreter dispatch.
-  STATIC_ASSERT(0 == Linkage::kInterpreterBytecodeOffsetParameter);
+  STATIC_ASSERT(0 == Linkage::kInterpreterAccumulatorParameter);
+  types.AddParam(kMachAnyTagged);
+  locations.AddParam(regloc(kInterpreterAccumulatorRegister));
+
+  STATIC_ASSERT(1 == Linkage::kInterpreterRegisterFileParameter);
+  types.AddParam(kMachPtr);
+  locations.AddParam(regloc(kInterpreterRegisterFileRegister));
+
+  STATIC_ASSERT(2 == Linkage::kInterpreterBytecodeOffsetParameter);
   types.AddParam(kMachIntPtr);
   locations.AddParam(regloc(kInterpreterBytecodeOffsetRegister));
 
-  STATIC_ASSERT(1 == Linkage::kInterpreterBytecodeArrayParameter);
+  STATIC_ASSERT(3 == Linkage::kInterpreterBytecodeArrayParameter);
   types.AddParam(kMachAnyTagged);
   locations.AddParam(regloc(kInterpreterBytecodeArrayRegister));
 
-  STATIC_ASSERT(2 == Linkage::kInterpreterDispatchTableParameter);
+  STATIC_ASSERT(4 == Linkage::kInterpreterDispatchTableParameter);
   types.AddParam(kMachPtr);
   locations.AddParam(regloc(kInterpreterDispatchTableRegister));
+
+  STATIC_ASSERT(5 == Linkage::kInterpreterContextParameter);
+  types.AddParam(kMachAnyTagged);
+#if defined(V8_TARGET_ARCH_IA32) || defined(V8_TARGET_ARCH_X87)
+  locations.AddParam(
+      LinkageLocation::ForCallerFrameSlot(kInterpreterContextSpillSlot));
+#else
+  locations.AddParam(regloc(kContextRegister));
+#endif
 
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister();
   return new (zone) CallDescriptor(         // --
@@ -497,7 +518,8 @@ LinkageLocation Linkage::GetOsrValueLocation(int index) const {
     return incoming_->GetInputLocation(context_index);
   } else if (index >= first_stack_slot) {
     // Local variable stored in this (callee) stack.
-    int spill_index = index - first_stack_slot;
+    int spill_index =
+        index - first_stack_slot + StandardFrameConstants::kFixedSlotCount;
     return LinkageLocation::ForCalleeFrameSlot(spill_index);
   } else {
     // Parameter. Use the assigned location from the incoming call descriptor.

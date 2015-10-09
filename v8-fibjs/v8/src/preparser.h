@@ -31,6 +31,7 @@ struct FormalParametersBase {
   bool has_rest = false;
   bool is_simple = true;
   int materialized_literals_count = 0;
+  mutable int rest_array_literal_index = -1;
 };
 
 
@@ -111,6 +112,7 @@ class ParserBase : public Traits {
         allow_harmony_sloppy_function_(false),
         allow_harmony_sloppy_let_(false),
         allow_harmony_rest_parameters_(false),
+        allow_harmony_default_parameters_(false),
         allow_harmony_spreadcalls_(false),
         allow_harmony_destructuring_(false),
         allow_harmony_spread_arrays_(false),
@@ -129,6 +131,7 @@ class ParserBase : public Traits {
   ALLOW_ACCESSORS(harmony_sloppy_function);
   ALLOW_ACCESSORS(harmony_sloppy_let);
   ALLOW_ACCESSORS(harmony_rest_parameters);
+  ALLOW_ACCESSORS(harmony_default_parameters);
   ALLOW_ACCESSORS(harmony_spreadcalls);
   ALLOW_ACCESSORS(harmony_destructuring);
   ALLOW_ACCESSORS(harmony_spread_arrays);
@@ -334,6 +337,11 @@ class ParserBase : public Traits {
   INLINE(Token::Value peek()) {
     if (stack_overflow_) return Token::ILLEGAL;
     return scanner()->peek();
+  }
+
+  INLINE(Token::Value PeekAhead()) {
+    if (stack_overflow_) return Token::ILLEGAL;
+    return scanner()->PeekAhead();
   }
 
   INLINE(Token::Value Next()) {
@@ -546,6 +554,14 @@ class ParserBase : public Traits {
     }
   }
 
+  void ValidateFormalParameterInitializer(
+      const ExpressionClassifier* classifier, bool* ok) {
+    if (!classifier->is_valid_formal_parameter_initializer()) {
+      ReportClassifierError(classifier->formal_parameter_initializer_error());
+      *ok = false;
+    }
+  }
+
   void ValidateBindingPattern(const ExpressionClassifier* classifier,
                               bool* ok) {
     if (!classifier->is_valid_binding_pattern()) {
@@ -625,6 +641,15 @@ class ParserBase : public Traits {
     GetUnexpectedTokenMessage(peek(), &message, &arg);
     classifier->RecordArrowFormalParametersError(scanner()->peek_location(),
                                                  message, arg);
+  }
+
+  void FormalParameterInitializerUnexpectedToken(
+      ExpressionClassifier* classifier) {
+    MessageTemplate::Template message = MessageTemplate::kUnexpectedToken;
+    const char* arg;
+    GetUnexpectedTokenMessage(peek(), &message, &arg);
+    classifier->RecordFormalParameterInitializerError(
+        scanner()->peek_location(), message, arg);
   }
 
   // Recursive descent functions:
@@ -707,6 +732,8 @@ class ParserBase : public Traits {
   void CheckArityRestrictions(
       int param_count, FunctionLiteral::ArityRestriction arity_restriction,
       bool has_rest, int formals_start_pos, int formals_end_pos, bool* ok);
+
+  bool IsNextLetKeyword();
 
   // Checks if the expression is a valid reference expression (e.g., on the
   // left-hand side of assignments). Although ruled out by ECMA as early errors,
@@ -805,6 +832,7 @@ class ParserBase : public Traits {
   bool allow_harmony_sloppy_function_;
   bool allow_harmony_sloppy_let_;
   bool allow_harmony_rest_parameters_;
+  bool allow_harmony_default_parameters_;
   bool allow_harmony_spreadcalls_;
   bool allow_harmony_destructuring_;
   bool allow_harmony_spread_arrays_;
@@ -914,7 +942,10 @@ class PreParserExpression {
   static PreParserExpression BinaryOperation(PreParserExpression left,
                                              Token::Value op,
                                              PreParserExpression right) {
-    return PreParserExpression(TypeField::encode(kBinaryOperationExpression));
+    return PreParserExpression(
+        TypeField::encode(kBinaryOperationExpression) |
+        HasRestField::encode(op == Token::COMMA &&
+                             right->IsSpreadExpression()));
   }
 
   static PreParserExpression StringLiteral() {
@@ -1031,6 +1062,14 @@ class PreParserExpression {
     return TypeField::decode(code_) == kSpreadExpression;
   }
 
+  bool IsArrowFunctionFormalParametersWithRestParameter() const {
+    // Iff the expression classifier has determined that this expression is a
+    // valid arrow fformal parameter list, return true if the formal parameter
+    // list ends with a rest parameter.
+    return IsSpreadExpression() ||
+           (IsBinaryOperation() && HasRestField::decode(code_));
+  }
+
   PreParserExpression AsFunctionLiteral() { return *this; }
 
   bool IsBinaryOperation() const {
@@ -1079,6 +1118,7 @@ class PreParserExpression {
   typedef BitField<bool, IsUseStrictField::kNext, 1> IsUseStrongField;
   typedef BitField<PreParserIdentifier::Type, TypeField::kNext, 10>
       IdentifierTypeField;
+  typedef BitField<bool, TypeField::kNext, 1> HasRestField;
 
   uint32_t code_;
 };
@@ -1303,6 +1343,10 @@ class PreParserFactory {
 
   PreParserExpression NewSpread(PreParserExpression expression, int pos) {
     return PreParserExpression::Spread(expression);
+  }
+
+  PreParserExpression NewEmptyParentheses(int pos) {
+    return PreParserExpression::Default();
   }
 
   // Return the object itself as AstVisitor and implement the needed
@@ -1637,12 +1681,15 @@ class PreParserTraits {
 
   void AddFormalParameter(
       PreParserFormalParameters* parameters, PreParserExpression pattern,
-      bool is_rest) {
+      PreParserExpression initializer, bool is_rest) {
     ++parameters->arity;
   }
   void DeclareFormalParameter(Scope* scope, PreParserIdentifier parameter,
-                              bool is_simple,
-                              ExpressionClassifier* classifier) {}
+                              ExpressionClassifier* classifier) {
+    if (!classifier->is_simple_parameter_list()) {
+      scope->SetHasNonSimpleParameters();
+    }
+  }
 
   void CheckConflictingVarDeclarations(Scope* scope, bool* ok) {}
 
@@ -1740,8 +1787,8 @@ class PreParser : public ParserBase<PreParserTraits> {
   // At return, unless an error occurred, the scanner is positioned before the
   // the final '}'.
   PreParseResult PreParseLazyFunction(
-      LanguageMode language_mode, FunctionKind kind, ParserRecorder* log,
-      Scanner::BookmarkScope* bookmark = nullptr);
+      LanguageMode language_mode, FunctionKind kind, bool has_simple_parameters,
+      ParserRecorder* log, Scanner::BookmarkScope* bookmark = nullptr);
 
  private:
   friend class PreParserTraits;
@@ -1844,6 +1891,12 @@ void PreParserTraits::ParseArrowFunctionFormalParameterList(
     Scanner::Location* duplicate_loc, bool* ok) {
   // TODO(wingo): Detect duplicated identifiers in paramlists.  Detect parameter
   // lists that are too long.
+
+  // Accomodate array literal for rest parameter.
+  if (params.IsArrowFunctionFormalParametersWithRestParameter()) {
+    ++parameters->materialized_literals_count;
+    pre_parser_->function_state_->NextMaterializedLiteralIndex();
+  }
 }
 
 
@@ -2259,38 +2312,37 @@ ParserBase<Traits>::ParsePrimaryExpression(ExpressionClassifier* classifier,
       }
       BindingPatternUnexpectedToken(classifier);
       Consume(Token::LPAREN);
-      if (allow_harmony_arrow_functions() && Check(Token::RPAREN)) {
-        // As a primary expression, the only thing that can follow "()" is "=>".
+      if (Check(Token::RPAREN)) {
+        // ()=>x.  The continuation that looks for the => is in
+        // ParseAssignmentExpression.
+        classifier->RecordExpressionError(scanner()->location(),
+                                          MessageTemplate::kUnexpectedToken,
+                                          Token::String(Token::RPAREN));
         classifier->RecordBindingPatternError(scanner()->location(),
                                               MessageTemplate::kUnexpectedToken,
                                               Token::String(Token::RPAREN));
-        // Give a good error to the user who might have typed e.g. "return();".
-        if (peek() != Token::ARROW) {
-          ReportUnexpectedTokenAt(scanner_->peek_location(), peek(),
-                                  MessageTemplate::kMissingArrow);
+        result = factory()->NewEmptyParentheses(beg_pos);
+      } else if (allow_harmony_rest_parameters() && Check(Token::ELLIPSIS)) {
+        // (...x)=>x.  The continuation that looks for the => is in
+        // ParseAssignmentExpression.
+        int ellipsis_pos = scanner()->location().beg_pos;
+        classifier->RecordExpressionError(scanner()->location(),
+                                          MessageTemplate::kUnexpectedToken,
+                                          Token::String(Token::ELLIPSIS));
+        classifier->RecordNonSimpleParameter();
+        Scanner::Location expr_loc = scanner()->peek_location();
+        Token::Value tok = peek();
+        result = this->ParseAssignmentExpression(true, classifier, CHECK_OK);
+        // Patterns are not allowed as rest parameters.  There is no way we can
+        // succeed so go ahead and use the convenient ReportUnexpectedToken
+        // interface.
+        if (!Traits::IsIdentifier(result)) {
+          ReportUnexpectedTokenAt(expr_loc, tok);
           *ok = false;
           return this->EmptyExpression();
         }
-        Scope* scope =
-            this->NewScope(scope_, ARROW_SCOPE, FunctionKind::kArrowFunction);
-        FormalParametersT parameters(scope);
-        scope->set_start_position(beg_pos);
-        ExpressionClassifier args_classifier;
-        result = this->ParseArrowFunctionLiteral(parameters, args_classifier,
-                                                 CHECK_OK);
-      } else if (allow_harmony_arrow_functions() &&
-                 allow_harmony_rest_parameters() && Check(Token::ELLIPSIS)) {
-        // (...x) => y
-        Scope* scope =
-            this->NewScope(scope_, ARROW_SCOPE, FunctionKind::kArrowFunction);
-        FormalParametersT formals(scope);
-        scope->set_start_position(beg_pos);
-        ExpressionClassifier formals_classifier;
-        formals.has_rest = true;
-        this->ParseFormalParameter(&formals, &formals_classifier, CHECK_OK);
-        Traits::DeclareFormalParameter(
-            formals.scope, formals.at(0), formals.is_simple,
-            &formals_classifier);
+        result = factory()->NewSpread(result, ellipsis_pos);
+
         if (peek() == Token::COMMA) {
           ReportMessageAt(scanner()->peek_location(),
                           MessageTemplate::kParamAfterRest);
@@ -2298,8 +2350,6 @@ ParserBase<Traits>::ParsePrimaryExpression(ExpressionClassifier* classifier,
           return this->EmptyExpression();
         }
         Expect(Token::RPAREN, CHECK_OK);
-        result = this->ParseArrowFunctionLiteral(formals, formals_classifier,
-                                                 CHECK_OK);
       } else {
         // Heuristically try to detect immediately called functions before
         // seeing the call parentheses.
@@ -2383,6 +2433,7 @@ typename ParserBase<Traits>::ExpressionT ParserBase<Traits>::ParseExpression(
       this->ParseAssignmentExpression(accept_IN, &binding_classifier, CHECK_OK);
   classifier->Accumulate(binding_classifier,
                          ExpressionClassifier::AllProductions);
+  bool is_simple_parameter_list = this->IsIdentifier(result);
   bool seen_rest = false;
   while (peek() == Token::COMMA) {
     if (seen_rest) {
@@ -2406,9 +2457,14 @@ typename ParserBase<Traits>::ExpressionT ParserBase<Traits>::ParseExpression(
     ExpressionT right = this->ParseAssignmentExpression(
         accept_IN, &binding_classifier, CHECK_OK);
     if (is_rest) right = factory()->NewSpread(right, pos);
+    is_simple_parameter_list =
+        is_simple_parameter_list && this->IsIdentifier(right);
     classifier->Accumulate(binding_classifier,
                            ExpressionClassifier::AllProductions);
     result = factory()->NewBinaryOperation(Token::COMMA, result, right, pos);
+  }
+  if (!is_simple_parameter_list || seen_rest) {
+    classifier->RecordNonSimpleParameter();
   }
   return result;
 }
@@ -2509,7 +2565,7 @@ typename ParserBase<Traits>::ExpressionT ParserBase<Traits>::ParsePropertyName(
       ExpressionT expression =
           ParseAssignmentExpression(true, &computed_name_classifier, CHECK_OK);
       classifier->Accumulate(computed_name_classifier,
-                             ExpressionClassifier::ExpressionProduction);
+                             ExpressionClassifier::ExpressionProductions);
       Expect(Token::RBRACK, CHECK_OK);
       return expression;
     }
@@ -2555,19 +2611,66 @@ ParserBase<Traits>::ParsePropertyDefinition(
     this->PushLiteralName(fni_, name);
   }
 
-  if (!in_class && !is_generator && peek() == Token::COLON) {
-    // PropertyDefinition : PropertyName ':' AssignmentExpression
-    if (!*is_computed_name) {
-      checker->CheckProperty(name_token, kValueProperty, is_static,
-                             is_generator,
-                             CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
-    }
-    Consume(Token::COLON);
-    value = this->ParseAssignmentExpression(
-        true, classifier, CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
+  if (!in_class && !is_generator) {
+    DCHECK(!is_static);
 
-  } else if (is_generator || peek() == Token::LPAREN) {
-    // Concise Method
+    if (peek() == Token::COLON) {
+      // PropertyDefinition
+      //    PropertyName ':' AssignmentExpression
+      if (!*is_computed_name) {
+        checker->CheckProperty(name_token, kValueProperty, false, false,
+                               CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
+      }
+      Consume(Token::COLON);
+      value = this->ParseAssignmentExpression(
+          true, classifier, CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
+      return factory()->NewObjectLiteralProperty(name_expression, value, false,
+                                                 *is_computed_name);
+    }
+
+    if (Token::IsIdentifier(name_token, language_mode(),
+                            this->is_generator()) &&
+        (peek() == Token::COMMA || peek() == Token::RBRACE ||
+         peek() == Token::ASSIGN)) {
+      // PropertyDefinition
+      //    IdentifierReference
+      //    CoverInitializedName
+      //
+      // CoverInitializedName
+      //    IdentifierReference Initializer?
+      if (classifier->duplicate_finder() != nullptr &&
+          scanner()->FindSymbol(classifier->duplicate_finder(), 1) != 0) {
+        classifier->RecordDuplicateFormalParameterError(scanner()->location());
+      }
+
+      ExpressionT lhs = this->ExpressionFromIdentifier(
+          name, next_beg_pos, next_end_pos, scope_, factory());
+
+      if (peek() == Token::ASSIGN) {
+        this->ExpressionUnexpectedToken(classifier);
+        Consume(Token::ASSIGN);
+        ExpressionClassifier rhs_classifier;
+        ExpressionT rhs = this->ParseAssignmentExpression(
+            true, &rhs_classifier, CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
+        classifier->Accumulate(rhs_classifier,
+                               ExpressionClassifier::ExpressionProductions);
+        value = factory()->NewAssignment(Token::ASSIGN, lhs, rhs,
+                                         RelocInfo::kNoPosition);
+      } else {
+        value = lhs;
+      }
+
+      return factory()->NewObjectLiteralProperty(
+          name_expression, value, ObjectLiteralProperty::COMPUTED, false,
+          false);
+    }
+  }
+
+
+  if (is_generator || peek() == Token::LPAREN) {
+    // MethodDefinition
+    //    PropertyName '(' StrictFormalParameters ')' '{' FunctionBody '}'
+    //    '*' PropertyName '(' StrictFormalParameters ')' '{' FunctionBody '}'
     if (!*is_computed_name) {
       checker->CheckProperty(name_token, kMethodProperty, is_static,
                              is_generator,
@@ -2594,13 +2697,19 @@ ParserBase<Traits>::ParsePropertyDefinition(
     return factory()->NewObjectLiteralProperty(name_expression, value,
                                                ObjectLiteralProperty::COMPUTED,
                                                is_static, *is_computed_name);
+  }
 
-  } else if (in_class && name_is_static && !is_static) {
-    // static MethodDefinition
+  if (in_class && name_is_static && !is_static) {
+    // ClassElement (static)
+    //    'static' MethodDefinition
     return ParsePropertyDefinition(checker, true, has_extends, true,
                                    is_computed_name, nullptr, classifier, ok);
-  } else if (is_get || is_set) {
-    // Accessor
+  }
+
+  if (is_get || is_set) {
+    // MethodDefinition (Accessors)
+    //    get PropertyName '(' ')' '{' FunctionBody '}'
+    //    set PropertyName '(' PropertySetParameterList ')' '{' FunctionBody '}'
     name = this->EmptyIdentifier();
     bool dont_care = false;
     name_token = peek();
@@ -2635,44 +2744,12 @@ ParserBase<Traits>::ParsePropertyDefinition(
         name_expression, value,
         is_get ? ObjectLiteralProperty::GETTER : ObjectLiteralProperty::SETTER,
         is_static, *is_computed_name);
-
-  } else if (!in_class && Token::IsIdentifier(name_token, language_mode(),
-                                              this->is_generator())) {
-    DCHECK(!*is_computed_name);
-    DCHECK(!is_static);
-
-    if (classifier->duplicate_finder() != nullptr &&
-        scanner()->FindSymbol(classifier->duplicate_finder(), 1) != 0) {
-      classifier->RecordDuplicateFormalParameterError(scanner()->location());
-    }
-
-    ExpressionT lhs = this->ExpressionFromIdentifier(
-        name, next_beg_pos, next_end_pos, scope_, factory());
-    if (peek() == Token::ASSIGN) {
-      this->ExpressionUnexpectedToken(classifier);
-      Consume(Token::ASSIGN);
-      ExpressionClassifier rhs_classifier;
-      ExpressionT rhs = this->ParseAssignmentExpression(
-          true, &rhs_classifier, CHECK_OK_CUSTOM(EmptyObjectLiteralProperty));
-      classifier->Accumulate(rhs_classifier,
-                             ExpressionClassifier::ExpressionProduction);
-      value = factory()->NewAssignment(Token::ASSIGN, lhs, rhs,
-                                       RelocInfo::kNoPosition);
-    } else {
-      value = lhs;
-    }
-    return factory()->NewObjectLiteralProperty(
-        name_expression, value, ObjectLiteralProperty::COMPUTED, false, false);
-
-  } else {
-    Token::Value next = Next();
-    ReportUnexpectedToken(next);
-    *ok = false;
-    return this->EmptyObjectLiteralProperty();
   }
 
-  return factory()->NewObjectLiteralProperty(name_expression, value, is_static,
-                                             *is_computed_name);
+  Token::Value next = Next();
+  ReportUnexpectedToken(next);
+  *ok = false;
+  return this->EmptyObjectLiteralProperty();
 }
 
 
@@ -2837,7 +2914,6 @@ ParserBase<Traits>::ParseAssignmentExpression(bool accept_IN,
   }
   ExpressionT expression = this->ParseConditionalExpression(
       accept_IN, &arrow_formals_classifier, CHECK_OK);
-
   if (allow_harmony_arrow_functions() && peek() == Token::ARROW) {
     BindingPatternUnexpectedToken(classifier);
     ValidateArrowFormalParameters(&arrow_formals_classifier, expression,
@@ -2846,12 +2922,18 @@ ParserBase<Traits>::ParseAssignmentExpression(bool accept_IN,
     Scope* scope =
         this->NewScope(scope_, ARROW_SCOPE, FunctionKind::kArrowFunction);
     FormalParametersT parameters(scope);
-    checkpoint.Restore(&parameters.materialized_literals_count);
+    if (!arrow_formals_classifier.is_simple_parameter_list()) {
+      scope->SetHasNonSimpleParameters();
+      parameters.is_simple = false;
+    }
 
-    scope->set_start_position(lhs_beg_pos);
     Scanner::Location duplicate_loc = Scanner::Location::invalid();
     this->ParseArrowFunctionFormalParameterList(&parameters, expression, loc,
                                                 &duplicate_loc, CHECK_OK);
+
+    checkpoint.Restore(&parameters.materialized_literals_count);
+
+    scope->set_start_position(lhs_beg_pos);
     if (duplicate_loc.IsValid()) {
       arrow_formals_classifier.RecordDuplicateFormalParameterError(
           duplicate_loc);
@@ -2873,7 +2955,7 @@ ParserBase<Traits>::ParseAssignmentExpression(bool accept_IN,
     return expression;
   }
 
-  if (!allow_harmony_destructuring()) {
+  if (!(allow_harmony_destructuring() || allow_harmony_default_parameters())) {
     BindingPatternUnexpectedToken(classifier);
   }
 
@@ -2894,7 +2976,7 @@ ParserBase<Traits>::ParseAssignmentExpression(bool accept_IN,
   ExpressionT right =
       this->ParseAssignmentExpression(accept_IN, &rhs_classifier, CHECK_OK);
   classifier->Accumulate(rhs_classifier,
-                         ExpressionClassifier::ExpressionProduction);
+                         ExpressionClassifier::ExpressionProductions);
 
   // TODO(1231235): We try to estimate the set of properties set by
   // constructors. We define a new property whenever there is an
@@ -2932,6 +3014,8 @@ ParserBase<Traits>::ParseYieldExpression(ExpressionClassifier* classifier,
   // YieldExpression ::
   //   'yield' ([no line terminator] '*'? AssignmentExpression)?
   int pos = peek_position();
+  BindingPatternUnexpectedToken(classifier);
+  FormalParameterInitializerUnexpectedToken(classifier);
   Expect(Token::YIELD, CHECK_OK);
   ExpressionT generator_object =
       factory()->NewVariableProxy(function_state_->generator_object_variable());
@@ -2985,6 +3069,7 @@ ParserBase<Traits>::ParseConditionalExpression(bool accept_IN,
   ExpressionT expression =
       this->ParseBinaryExpression(4, accept_IN, classifier, CHECK_OK);
   if (peek() != Token::CONDITIONAL) return expression;
+  ArrowFormalParametersUnexpectedToken(classifier);
   BindingPatternUnexpectedToken(classifier);
   Consume(Token::CONDITIONAL);
   // In parsing the first assignment expression in conditional
@@ -3010,6 +3095,7 @@ ParserBase<Traits>::ParseBinaryExpression(int prec, bool accept_IN,
     // prec1 >= 4
     while (Precedence(peek(), accept_IN) == prec1) {
       BindingPatternUnexpectedToken(classifier);
+      ArrowFormalParametersUnexpectedToken(classifier);
       Token::Value op = Next();
       Scanner::Location op_location = scanner()->location();
       int pos = position();
@@ -3072,6 +3158,7 @@ ParserBase<Traits>::ParseUnaryExpression(ExpressionClassifier* classifier,
   Token::Value op = peek();
   if (Token::IsUnaryOp(op)) {
     BindingPatternUnexpectedToken(classifier);
+    ArrowFormalParametersUnexpectedToken(classifier);
 
     op = Next();
     int pos = position();
@@ -3094,6 +3181,7 @@ ParserBase<Traits>::ParseUnaryExpression(ExpressionClassifier* classifier,
     return this->BuildUnaryExpression(expression, op, pos, factory());
   } else if (Token::IsCountOp(op)) {
     BindingPatternUnexpectedToken(classifier);
+    ArrowFormalParametersUnexpectedToken(classifier);
     op = Next();
     int beg_pos = peek_position();
     ExpressionT expression = this->ParseUnaryExpression(classifier, CHECK_OK);
@@ -3126,6 +3214,7 @@ ParserBase<Traits>::ParsePostfixExpression(ExpressionClassifier* classifier,
   if (!scanner()->HasAnyLineTerminatorBeforeNext() &&
       Token::IsCountOp(peek())) {
     BindingPatternUnexpectedToken(classifier);
+    ArrowFormalParametersUnexpectedToken(classifier);
 
     expression = this->CheckAndRewriteReferenceExpression(
         expression, lhs_beg_pos, scanner()->location().end_pos,
@@ -3157,6 +3246,7 @@ ParserBase<Traits>::ParseLeftHandSideExpression(
     switch (peek()) {
       case Token::LBRACK: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
         Consume(Token::LBRACK);
         int pos = position();
         ExpressionT index = ParseExpression(true, classifier, CHECK_OK);
@@ -3167,6 +3257,7 @@ ParserBase<Traits>::ParseLeftHandSideExpression(
 
       case Token::LPAREN: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
 
         if (is_strong(language_mode()) && this->IsIdentifier(result) &&
             this->IsEval(this->AsIdentifier(result))) {
@@ -3228,6 +3319,7 @@ ParserBase<Traits>::ParseLeftHandSideExpression(
 
       case Token::PERIOD: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
         Consume(Token::PERIOD);
         int pos = position();
         IdentifierT name = ParseIdentifierName(CHECK_OK);
@@ -3240,6 +3332,7 @@ ParserBase<Traits>::ParseLeftHandSideExpression(
       case Token::TEMPLATE_SPAN:
       case Token::TEMPLATE_TAIL: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
         result = ParseTemplateLiteral(result, position(), classifier, CHECK_OK);
         break;
       }
@@ -3277,6 +3370,7 @@ ParserBase<Traits>::ParseMemberWithNewPrefixesExpression(
 
   if (peek() == Token::NEW) {
     BindingPatternUnexpectedToken(classifier);
+    ArrowFormalParametersUnexpectedToken(classifier);
     Consume(Token::NEW);
     int new_pos = position();
     ExpressionT result = this->EmptyExpression();
@@ -3330,6 +3424,7 @@ ParserBase<Traits>::ParseMemberExpression(ExpressionClassifier* classifier,
   ExpressionT result = this->EmptyExpression();
   if (peek() == Token::FUNCTION) {
     BindingPatternUnexpectedToken(classifier);
+    ArrowFormalParametersUnexpectedToken(classifier);
 
     Consume(Token::FUNCTION);
     int function_token_position = position();
@@ -3573,6 +3668,7 @@ ParserBase<Traits>::ParseMemberExpressionContinuation(
     switch (peek()) {
       case Token::LBRACK: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
 
         Consume(Token::LBRACK);
         int pos = position();
@@ -3586,6 +3682,7 @@ ParserBase<Traits>::ParseMemberExpressionContinuation(
       }
       case Token::PERIOD: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
 
         Consume(Token::PERIOD);
         int pos = position();
@@ -3600,6 +3697,7 @@ ParserBase<Traits>::ParseMemberExpressionContinuation(
       case Token::TEMPLATE_SPAN:
       case Token::TEMPLATE_TAIL: {
         BindingPatternUnexpectedToken(classifier);
+        ArrowFormalParametersUnexpectedToken(classifier);
         int pos;
         if (scanner()->current_token() == Token::IDENTIFIER) {
           pos = position();
@@ -3638,22 +3736,37 @@ void ParserBase<Traits>::ParseFormalParameter(
   ValidateBindingPattern(classifier, ok);
   if (!*ok) return;
 
-  if (!allow_harmony_destructuring() && !Traits::IsIdentifier(pattern)) {
-    ReportUnexpectedToken(next);
-    *ok = false;
-    return;
+  if (!Traits::IsIdentifier(pattern)) {
+    if (is_rest || !allow_harmony_destructuring()) {
+      ReportUnexpectedToken(next);
+      *ok = false;
+      return;
+    }
+    parameters->is_simple = false;
+    ValidateFormalParameterInitializer(classifier, ok);
+    if (!*ok) return;
+    classifier->RecordNonSimpleParameter();
   }
 
-  if (parameters->is_simple) {
-    parameters->is_simple = !is_rest && Traits::IsIdentifier(pattern);
+  if (is_rest) {
+    parameters->rest_array_literal_index =
+        function_state_->NextMaterializedLiteralIndex();
+    ++parameters->materialized_literals_count;
   }
-  parameters->has_rest = is_rest;
-  if (is_rest && !Traits::IsIdentifier(pattern)) {
-    ReportUnexpectedToken(next);
-    *ok = false;
-    return;
+
+  ExpressionT initializer = Traits::EmptyExpression();
+  if (!is_rest && allow_harmony_default_parameters() && Check(Token::ASSIGN)) {
+    ExpressionClassifier init_classifier;
+    initializer = ParseAssignmentExpression(true, &init_classifier, ok);
+    if (!*ok) return;
+    ValidateExpression(&init_classifier, ok);
+    ValidateFormalParameterInitializer(&init_classifier, ok);
+    if (!*ok) return;
+    parameters->is_simple = false;
+    classifier->RecordNonSimpleParameter();
   }
-  Traits::AddFormalParameter(parameters, pattern, is_rest);
+
+  Traits::AddFormalParameter(parameters, pattern, initializer, is_rest);
 }
 
 
@@ -3689,18 +3802,21 @@ void ParserBase<Traits>::ParseFormalParameterList(
       if (!*ok) return;
     } while (!parameters->has_rest && Check(Token::COMMA));
 
-    if (parameters->has_rest && peek() == Token::COMMA) {
-      ReportMessageAt(scanner()->peek_location(),
+    if (parameters->has_rest) {
+      parameters->is_simple = false;
+      classifier->RecordNonSimpleParameter();
+      if (peek() == Token::COMMA) {
+        ReportMessageAt(scanner()->peek_location(),
                       MessageTemplate::kParamAfterRest);
-      *ok = false;
-      return;
+        *ok = false;
+        return;
+      }
     }
   }
 
   for (int i = 0; i < parameters->Arity(); ++i) {
     auto parameter = parameters->at(i);
-    Traits::DeclareFormalParameter(
-        parameters->scope, parameter, parameters->is_simple, classifier);
+    Traits::DeclareFormalParameter(parameters->scope, parameter, classifier);
   }
 }
 
@@ -3731,6 +3847,27 @@ void ParserBase<Traits>::CheckArityRestrictions(
       break;
     default:
       break;
+  }
+}
+
+
+template <class Traits>
+bool ParserBase<Traits>::IsNextLetKeyword() {
+  DCHECK(peek() == Token::LET);
+  if (!allow_let()) {
+    return false;
+  }
+  Token::Value next_next = PeekAhead();
+  switch (next_next) {
+    case Token::LBRACE:
+    case Token::LBRACK:
+    case Token::IDENTIFIER:
+    case Token::STATIC:
+    case Token::LET:  // Yes, you can do let let = ... in sloppy mode
+    case Token::YIELD:
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -3777,6 +3914,11 @@ ParserBase<Traits>::ParseArrowFunctionLiteral(
         body = this->NewStatementList(0, zone());
         this->SkipLazyFunctionBody(&materialized_literal_count,
                                    &expected_property_count, CHECK_OK);
+
+        if (formal_parameters.materialized_literals_count > 0) {
+          materialized_literal_count +=
+              formal_parameters.materialized_literals_count;
+        }
       } else {
         body = this->ParseEagerFunctionBody(
             this->EmptyIdentifier(), RelocInfo::kNoPosition, formal_parameters,

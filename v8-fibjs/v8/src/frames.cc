@@ -727,6 +727,13 @@ bool JavaScriptFrame::IsConstructor() const {
 }
 
 
+bool JavaScriptFrame::HasInlinedFrames() {
+  List<JSFunction*> functions(1);
+  GetFunctions(&functions);
+  return functions.length() > 1;
+}
+
+
 Object* JavaScriptFrame::GetOriginalConstructor() const {
   Address fp = caller_fp();
   if (has_adapted_arguments()) {
@@ -877,6 +884,15 @@ void JavaScriptFrame::RestoreOperandStack(FixedArray* store) {
     Memory::Object_at(GetOperandSlot(i)) = store->get(i);
   }
 }
+
+
+FrameSummary::FrameSummary(Object* receiver, JSFunction* function, Code* code,
+                           int offset, bool is_constructor)
+    : receiver_(receiver, function->GetIsolate()),
+      function_(function),
+      code_(code),
+      offset_(offset),
+      is_constructor_(is_constructor) {}
 
 
 void FrameSummary::Print() {
@@ -1079,18 +1095,14 @@ void OptimizedFrame::GetFunctions(List<JSFunction*>* functions) {
 }
 
 
-Object* OptimizedFrame::StackSlotAt(int index) const {
-  // Positive index means the value is spilled to the locals
-  // area. Negative means it is stored in the incoming parameter
-  // area.
-  if (index >= 0) return GetExpression(index);
+int OptimizedFrame::StackSlotOffsetRelativeToFp(int slot_index) {
+  return StandardFrameConstants::kCallerSPOffset -
+         ((slot_index + 1) * kPointerSize);
+}
 
-  // Index -1 overlaps with last parameter, -n with the first parameter,
-  // (-n - 1) with the receiver with n being the number of parameters
-  // of the outermost, optimized frame.
-  int const parameter_count = ComputeParametersCount();
-  int const parameter_index = index + parameter_count;
-  return (parameter_index == -1) ? receiver() : GetParameter(parameter_index);
+
+Object* OptimizedFrame::StackSlotAt(int index) const {
+  return Memory::Object_at(fp() + StackSlotOffsetRelativeToFp(index));
 }
 
 

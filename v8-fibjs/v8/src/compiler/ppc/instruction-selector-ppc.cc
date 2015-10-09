@@ -286,6 +286,9 @@ void InstructionSelector::VisitCheckedLoad(Node* node) {
     case kRepWord32:
       opcode = kCheckedLoadWord32;
       break;
+    case kRepWord64:
+      opcode = kCheckedLoadWord64;
+      break;
     case kRepFloat32:
       opcode = kCheckedLoadFloat32;
       break;
@@ -320,6 +323,9 @@ void InstructionSelector::VisitCheckedStore(Node* node) {
       break;
     case kRepWord32:
       opcode = kCheckedStoreWord32;
+      break;
+    case kRepWord64:
+      opcode = kCheckedStoreWord64;
       break;
     case kRepFloat32:
       opcode = kCheckedStoreFloat32;
@@ -908,6 +914,30 @@ void InstructionSelector::VisitTruncateInt64ToInt32(Node* node) {
 #endif
 
 
+void InstructionSelector::VisitBitcastFloat32ToInt32(Node* node) {
+  VisitRR(this, kPPC_BitcastFloat32ToInt32, node);
+}
+
+
+#if V8_TARGET_ARCH_PPC64
+void InstructionSelector::VisitBitcastFloat64ToInt64(Node* node) {
+  VisitRR(this, kPPC_BitcastDoubleToInt64, node);
+}
+#endif
+
+
+void InstructionSelector::VisitBitcastInt32ToFloat32(Node* node) {
+  VisitRR(this, kPPC_BitcastInt32ToFloat32, node);
+}
+
+
+#if V8_TARGET_ARCH_PPC64
+void InstructionSelector::VisitBitcastInt64ToFloat64(Node* node) {
+  VisitRR(this, kPPC_BitcastInt64ToDouble, node);
+}
+#endif
+
+
 void InstructionSelector::VisitFloat32Add(Node* node) {
   VisitRRR(this, kPPC_AddDouble, node);
 }
@@ -1478,15 +1508,19 @@ void InstructionSelector::VisitCall(Node* node, BasicBlock* handler) {
     }
   } else {
     // Push any stack arguments.
-    int num_slots = buffer.pushed_nodes.size();
+    int num_slots = static_cast<int>(descriptor->StackParameterCount());
     int slot = 0;
-    for (Node* node : buffer.pushed_nodes) {
+    for (Node* input : buffer.pushed_nodes) {
       if (slot == 0) {
-        Emit(kPPC_PushFrame, g.NoOutput(), g.UseRegister(node),
+        DCHECK(input);
+        Emit(kPPC_PushFrame, g.NoOutput(), g.UseRegister(input),
              g.TempImmediate(num_slots));
       } else {
-        Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(node),
-             g.TempImmediate(slot));
+        // Skip any alignment holes in pushed nodes.
+        if (input) {
+          Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(input),
+               g.TempImmediate(slot));
+        }
       }
       ++slot;
     }
@@ -1582,8 +1616,17 @@ void InstructionSelector::VisitTailCall(Node* node) {
     InitializeCallBuffer(node, &buffer, true, false);
 
     // Push any stack arguments.
-    for (Node* node : base::Reversed(buffer.pushed_nodes)) {
-      Emit(kPPC_Push, g.NoOutput(), g.UseRegister(node));
+    int num_slots = static_cast<int>(descriptor->StackParameterCount());
+    int slot = 0;
+    for (Node* input : buffer.pushed_nodes) {
+      if (slot == 0) {
+        Emit(kPPC_PushFrame, g.NoOutput(), g.UseRegister(input),
+             g.TempImmediate(num_slots));
+      } else {
+        Emit(kPPC_StoreToStackSlot, g.NoOutput(), g.UseRegister(input),
+             g.TempImmediate(slot));
+      }
+      ++slot;
     }
 
     // Select the appropriate opcode based on the call type.

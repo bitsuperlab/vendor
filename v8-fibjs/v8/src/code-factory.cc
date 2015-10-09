@@ -153,9 +153,8 @@ Callable CodeFactory::StoreGlobalViaContext(Isolate* isolate, int depth,
 
 
 // static
-Callable CodeFactory::Instanceof(Isolate* isolate,
-                                 InstanceofStub::Flags flags) {
-  InstanceofStub stub(isolate, flags);
+Callable CodeFactory::InstanceOf(Isolate* isolate) {
+  InstanceOfStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -177,6 +176,13 @@ Callable CodeFactory::ToNumber(Isolate* isolate) {
 
 
 // static
+Callable CodeFactory::ToString(Isolate* isolate) {
+  ToStringStub stub(isolate);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
 Callable CodeFactory::ToObject(Isolate* isolate) {
   ToObjectStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
@@ -187,6 +193,13 @@ Callable CodeFactory::ToObject(Isolate* isolate) {
 Callable CodeFactory::StringAdd(Isolate* isolate, StringAddFlags flags,
                                 PretenureFlag pretenure_flag) {
   StringAddStub stub(isolate, flags, pretenure_flag);
+  return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::StringCompare(Isolate* isolate) {
+  StringCompareStub stub(isolate);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
 }
 
@@ -234,6 +247,13 @@ Callable CodeFactory::CallFunction(Isolate* isolate, int argc,
                                    CallFunctionFlags flags) {
   CallFunctionStub stub(isolate, argc, flags);
   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+}
+
+
+// static
+Callable CodeFactory::PushArgsAndCall(Isolate* isolate) {
+  return Callable(isolate->builtins()->PushArgsAndCall(),
+                  PushArgsAndCallDescriptor(isolate));
 }
 
 }  // namespace internal

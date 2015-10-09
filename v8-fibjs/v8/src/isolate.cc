@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/isolate.h"
+
 #include <stdlib.h>
 
 #include <fstream>  // NOLINT(readability/streams)
 #include <sstream>
-
-#include "src/v8.h"
 
 #include "src/ast.h"
 #include "src/base/platform/platform.h"
@@ -26,6 +26,7 @@
 #include "src/hydrogen.h"
 #include "src/ic/stub-cache.h"
 #include "src/interpreter/interpreter.h"
+#include "src/isolate-inl.h"
 #include "src/lithium-allocator.h"
 #include "src/log.h"
 #include "src/messages.h"
@@ -36,6 +37,7 @@
 #include "src/scopeinfo.h"
 #include "src/simulator.h"
 #include "src/snapshot/serialize.h"
+#include "src/v8.h"
 #include "src/version.h"
 #include "src/vm-state-inl.h"
 
@@ -312,18 +314,13 @@ static bool IsVisibleInStackTrace(JSFunction* fun,
   }
   // Skip all frames until we've seen the caller.
   if (!(*seen_caller)) return false;
-  // Also, skip non-visible built-in functions and any call with the builtins
-  // object as receiver, so as to not reveal either the builtins object or
-  // an internal function.
+  // Functions defined in native scripts are not visible unless directly
+  // exposed, in which case the native flag is set.
   // The --builtins-in-stack-traces command line flag allows including
   // internal call sites in the stack trace for debugging purposes.
   if (!FLAG_builtins_in_stack_traces) {
     if (receiver->IsJSBuiltinsObject()) return false;
-    if (fun->IsBuiltin()) {
-      return fun->shared()->native();
-    } else if (!fun->IsSubjectToDebugging()) {
-      return false;
-    }
+    if (fun->IsBuiltin()) return fun->shared()->native();
   }
   return true;
 }
@@ -845,17 +842,19 @@ Object* Isolate::StackOverflow() {
   // At this point we cannot create an Error object using its javascript
   // constructor.  Instead, we copy the pre-constructed boilerplate and
   // attach the stack trace as a hidden property.
-  Handle<String> key = factory()->stack_overflow_string();
-  Handle<Object> boilerplate =
-      Object::GetProperty(js_builtins_object(), key).ToHandleChecked();
-  if (boilerplate->IsUndefined()) {
-    return Throw(heap()->undefined_value(), nullptr);
+  Handle<Object> exception;
+  if (bootstrapper()->IsActive()) {
+    // There is no boilerplate to use during bootstrapping.
+    exception = factory()->NewStringFromAsciiChecked(
+        MessageTemplate::TemplateString(MessageTemplate::kStackOverflow));
+  } else {
+    Handle<JSObject> boilerplate = stack_overflow_boilerplate();
+    Handle<JSObject> copy = factory()->CopyJSObject(boilerplate);
+    CaptureAndSetSimpleStackTrace(copy, factory()->undefined_value());
+    exception = copy;
   }
-  Handle<JSObject> exception =
-      factory()->CopyJSObject(Handle<JSObject>::cast(boilerplate));
   Throw(*exception, nullptr);
 
-  CaptureAndSetSimpleStackTrace(exception, factory()->undefined_value());
 #ifdef VERIFY_HEAP
   if (FLAG_verify_heap && FLAG_stress_compaction) {
     heap()->CollectAllAvailableGarbage("trigger compaction");
@@ -995,11 +994,10 @@ Object* Isolate::Throw(Object* exception, MessageLocation* location) {
 
   // Generate the message if required.
   if (requires_message && !rethrowing_message) {
-    MessageLocation potential_computed_location;
-    if (location == NULL) {
-      // If no location was specified we use a computed one instead.
-      ComputeLocation(&potential_computed_location);
-      location = &potential_computed_location;
+    MessageLocation computed_location;
+    // If no location was specified we try to use a computed one instead.
+    if (location == NULL && ComputeLocation(&computed_location)) {
+      location = &computed_location;
     }
 
     if (bootstrapper()->IsActive()) {
@@ -1260,8 +1258,7 @@ void Isolate::PrintCurrentStackTrace(FILE* out) {
 }
 
 
-void Isolate::ComputeLocation(MessageLocation* target) {
-  *target = MessageLocation(Handle<Script>(heap_.empty_script()), -1, -1);
+bool Isolate::ComputeLocation(MessageLocation* target) {
   StackTraceFrameIterator it(this);
   if (!it.done()) {
     JavaScriptFrame* frame = it.frame();
@@ -1269,12 +1266,19 @@ void Isolate::ComputeLocation(MessageLocation* target) {
     Object* script = fun->shared()->script();
     if (script->IsScript() &&
         !(Script::cast(script)->source()->IsUndefined())) {
-      int pos = frame->LookupCode()->SourcePosition(frame->pc());
-      // Compute the location from the function and the reloc info.
       Handle<Script> casted_script(Script::cast(script));
+      // Compute the location from the function and the relocation info of the
+      // baseline code. For optimized code this will use the deoptimization
+      // information to get canonical location information.
+      List<FrameSummary> frames(FLAG_max_inlining_levels + 1);
+      it.frame()->Summarize(&frames);
+      FrameSummary& summary = frames.last();
+      int pos = summary.code()->SourcePosition(summary.pc());
       *target = MessageLocation(casted_script, pos, pos + 1, handle(fun));
+      return true;
     }
   }
+  return false;
 }
 
 
@@ -1307,8 +1311,6 @@ bool Isolate::ComputeLocationFromException(MessageLocation* target,
 
 bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
                                             Handle<Object> exception) {
-  *target = MessageLocation(Handle<Script>(heap_.empty_script()), -1, -1);
-
   if (!exception->IsJSObject()) return false;
   Handle<Name> key = factory()->stack_trace_symbol();
   Handle<Object> property =
@@ -1346,7 +1348,7 @@ bool Isolate::IsErrorObject(Handle<Object> obj) {
   for (PrototypeIterator iter(this, *obj, PrototypeIterator::START_AT_RECEIVER);
        !iter.IsAtEnd(); iter.Advance()) {
     if (iter.GetCurrent()->IsJSProxy()) return false;
-    if (JSObject::cast(iter.GetCurrent())->map()->GetConstructor() ==
+    if (iter.GetCurrent<JSObject>()->map()->GetConstructor() ==
         *error_constructor) {
       return true;
     }
@@ -1358,7 +1360,6 @@ bool Isolate::IsErrorObject(Handle<Object> obj) {
 Handle<JSMessageObject> Isolate::CreateMessage(Handle<Object> exception,
                                                MessageLocation* location) {
   Handle<JSArray> stack_trace_object;
-  MessageLocation potential_computed_location;
   if (capture_stack_trace_for_uncaught_exceptions_) {
     if (IsErrorObject(exception)) {
       // We fetch the stack trace that corresponds to this error object.
@@ -1375,15 +1376,12 @@ Handle<JSMessageObject> Isolate::CreateMessage(Handle<Object> exception,
           stack_trace_for_uncaught_exceptions_options_);
     }
   }
-  if (!location) {
-    if (!ComputeLocationFromException(&potential_computed_location,
-                                      exception)) {
-      if (!ComputeLocationFromStackTrace(&potential_computed_location,
-                                         exception)) {
-        ComputeLocation(&potential_computed_location);
-      }
-    }
-    location = &potential_computed_location;
+  MessageLocation computed_location;
+  if (location == NULL &&
+      (ComputeLocationFromException(&computed_location, exception) ||
+       ComputeLocationFromStackTrace(&computed_location, exception) ||
+       ComputeLocation(&computed_location))) {
+    location = &computed_location;
   }
 
   return MessageHandler::MakeMessageObject(
@@ -1758,8 +1756,6 @@ Isolate::Isolate(bool enable_serializer)
       // TODO(bmeurer) Initialized lazily because it depends on flags; can
       // be fixed once the default isolate cleanup is done.
       random_number_generator_(NULL),
-      store_buffer_hash_set_1_address_(NULL),
-      store_buffer_hash_set_2_address_(NULL),
       serializer_enabled_(enable_serializer),
       has_fatal_error_(false),
       initialized_from_snapshot_(false),
@@ -1769,6 +1765,7 @@ Isolate::Isolate(bool enable_serializer)
       deferred_handles_head_(NULL),
       optimizing_compile_dispatcher_(NULL),
       stress_deopt_count_(0),
+      vector_store_virtual_register_(NULL),
       next_optimization_id_(0),
 #if TRACE_MAPS
       next_unique_sfi_id_(0),
@@ -2078,7 +2075,7 @@ bool Isolate::Init(Deserializer* des) {
   }
 
   // The initialization process does not handle memory exhaustion.
-  DisallowAllocationFailure disallow_allocation_failure(this);
+  AlwaysAllocateScope always_allocate(this);
 
   memory_allocator_ = new MemoryAllocator(this);
   code_range_ = new CodeRange(this);
@@ -2159,10 +2156,6 @@ bool Isolate::Init(Deserializer* des) {
   bootstrapper_->Initialize(create_heap_objects);
   builtins_.SetUp(this, create_heap_objects);
 
-  if (FLAG_ignition) {
-    interpreter_->Initialize();
-  }
-
   if (FLAG_log_internal_timer_events) {
     set_event_logger(Logger::DefaultEventLoggerSentinel);
   }
@@ -2188,6 +2181,10 @@ bool Isolate::Init(Deserializer* des) {
     des->Deserialize(this);
   }
   stub_cache_->Initialize();
+
+  if (FLAG_ignition) {
+    interpreter_->Initialize();
+  }
 
   // Finish initialization of ThreadLocal after deserialization is done.
   clear_pending_exception();
@@ -2560,9 +2557,6 @@ Handle<JSObject> Isolate::GetSymbolRegistry() {
     SetUpSubregistry(registry, map, "for");
     SetUpSubregistry(registry, map, "for_api");
     SetUpSubregistry(registry, map, "keyFor");
-    SetUpSubregistry(registry, map, "private_api");
-    heap()->AddPrivateGlobalSymbols(
-        SetUpSubregistry(registry, map, "private_intern"));
   }
   return Handle<JSObject>::cast(factory()->symbol_registry());
 }
@@ -2809,6 +2803,18 @@ SaveContext::SaveContext(Isolate* isolate)
 
   c_entry_fp_ = isolate->c_entry_fp(isolate->thread_local_top());
 }
+
+
+SaveContext::~SaveContext() {
+  isolate_->set_context(context_.is_null() ? NULL : *context_);
+  isolate_->set_save_context(prev_);
+}
+
+
+#ifdef DEBUG
+AssertNoContextChange::AssertNoContextChange(Isolate* isolate)
+    : isolate_(isolate), context_(isolate->context(), isolate) {}
+#endif  // DEBUG
 
 
 bool PostponeInterruptsScope::Intercept(StackGuard::InterruptFlag flag) {

@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/v8.h"
-
 #include "src/heap/incremental-marking.h"
 
 #include "src/code-stubs.h"
 #include "src/compilation-cache.h"
 #include "src/conversions.h"
+#include "src/heap/gc-tracer.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/objects-visiting.h"
 #include "src/heap/objects-visiting-inl.h"
+#include "src/v8.h"
 
 namespace v8 {
 namespace internal {
@@ -43,8 +43,7 @@ IncrementalMarking::IncrementalMarking(Heap* heap)
       was_activated_(false),
       weak_closure_was_overapproximated_(false),
       weak_closure_approximation_rounds_(0),
-      request_type_(COMPLETE_MARKING),
-      gc_callback_flags_(kNoGCCallbackFlags) {}
+      request_type_(COMPLETE_MARKING) {}
 
 
 void IncrementalMarking::RecordWriteSlow(HeapObject* obj, Object** slot,
@@ -199,10 +198,10 @@ class IncrementalMarkingMarkingVisitor
       chunk->set_progress_bar(start_offset);
       if (start_offset < object_size) {
         if (Marking::IsGrey(Marking::MarkBitFrom(object))) {
-          heap->mark_compact_collector()->marking_deque()->UnshiftGrey(object);
+          heap->mark_compact_collector()->marking_deque()->Unshift(object);
         } else {
           DCHECK(Marking::IsBlack(Marking::MarkBitFrom(object)));
-          heap->mark_compact_collector()->marking_deque()->UnshiftBlack(object);
+          heap->mark_compact_collector()->UnshiftBlack(object);
         }
         heap->incremental_marking()->NotifyIncompleteScanOfObject(
             object_size - (start_offset - already_scanned_offset));
@@ -299,12 +298,6 @@ void IncrementalMarking::SetOldSpacePageFlags(MemoryChunk* chunk,
   if (is_marking) {
     chunk->SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
     chunk->SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
-
-    // It's difficult to filter out slots recorded for large objects.
-    if (chunk->owner()->identity() == LO_SPACE &&
-        chunk->size() > static_cast<size_t>(Page::kPageSize) && is_compacting) {
-      chunk->SetFlag(MemoryChunk::RESCAN_ON_EVACUATION);
-    }
   } else {
     chunk->ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
     chunk->SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
@@ -470,9 +463,7 @@ static void PatchIncrementalMarkingRecordWriteStubs(
 }
 
 
-void IncrementalMarking::Start(int mark_compact_flags,
-                               const GCCallbackFlags gc_callback_flags,
-                               const char* reason) {
+void IncrementalMarking::Start(const char* reason) {
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Start (%s)\n",
            (reason == nullptr) ? "unknown reason" : reason);
@@ -484,13 +475,10 @@ void IncrementalMarking::Start(int mark_compact_flags,
 
   ResetStepCounters();
 
-  gc_callback_flags_ = gc_callback_flags;
   was_activated_ = true;
 
   if (!heap_->mark_compact_collector()->sweeping_in_progress()) {
-    heap_->mark_compact_collector()->SetFlags(mark_compact_flags);
     StartMarking();
-    heap_->mark_compact_collector()->SetFlags(Heap::kNoGCFlags);
   } else {
     if (FLAG_trace_incremental_marking) {
       PrintF("[IncrementalMarking] Start sweeping.\n");
@@ -499,6 +487,7 @@ void IncrementalMarking::Start(int mark_compact_flags,
   }
 
   heap_->new_space()->LowerInlineAllocationLimit(kAllocatedThreshold);
+  incremental_marking_job()->Start(heap_);
 }
 
 
@@ -554,6 +543,7 @@ void IncrementalMarking::StartMarking() {
 void IncrementalMarking::MarkObjectGroups() {
   DCHECK(FLAG_overapproximate_weak_closure);
   DCHECK(!weak_closure_was_overapproximated_);
+  DCHECK(IsMarking());
 
   int old_marking_deque_top =
       heap_->mark_compact_collector()->marking_deque()->top();
@@ -827,7 +817,8 @@ void IncrementalMarking::Epilogue() {
 
 void IncrementalMarking::OldSpaceStep(intptr_t allocated) {
   if (IsStopped() && ShouldActivateEvenWithoutIdleNotification()) {
-    Start(Heap::kNoGCFlags, kNoGCCallbackFlags, "old space step");
+    heap()->StartIncrementalMarking(Heap::kNoGCFlags, kNoGCCallbackFlags,
+                                    "old space step");
   } else {
     Step(allocated * kFastMarking / kInitialMarkingSpeed, GC_VIA_STACK_GUARD);
   }
@@ -910,6 +901,8 @@ intptr_t IncrementalMarking::Step(intptr_t allocated_bytes,
                                   CompletionAction action,
                                   ForceMarkingAction marking,
                                   ForceCompletionAction completion) {
+  DCHECK(allocated_bytes >= 0);
+
   if (heap_->gc_state() != Heap::NOT_IN_GC || !FLAG_incremental_marking ||
       (state_ != SWEEPING && state_ != MARKING)) {
     return 0;

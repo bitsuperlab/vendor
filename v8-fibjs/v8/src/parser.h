@@ -104,9 +104,6 @@ class ParseInfo {
     ast_value_factory_ = ast_value_factory;
   }
 
-  FunctionLiteral* function() {  // TODO(titzer): temporary name adapter
-    return literal_;
-  }
   FunctionLiteral* literal() { return literal_; }
   void set_literal(FunctionLiteral* literal) { literal_ = literal; }
 
@@ -541,11 +538,17 @@ class SingletonLogger;
 
 struct ParserFormalParameters : FormalParametersBase {
   struct Parameter {
-    Parameter(const AstRawString* name, Expression* pattern, bool is_rest)
-        : name(name), pattern(pattern), is_rest(is_rest) {}
+    Parameter(const AstRawString* name, Expression* pattern,
+              Expression* initializer, bool is_rest)
+        : name(name), pattern(pattern), initializer(initializer),
+          is_rest(is_rest) {}
     const AstRawString* name;
     Expression* pattern;
+    Expression* initializer;
     bool is_rest;
+    bool is_simple() const {
+      return pattern->IsVariableProxy() && initializer == nullptr && !is_rest;
+    }
   };
 
   explicit ParserFormalParameters(Scope* scope)
@@ -779,14 +782,15 @@ class ParserTraits {
                             FunctionKind kind = kNormalFunction);
 
   V8_INLINE void AddFormalParameter(
-      ParserFormalParameters* parameters, Expression* pattern, bool is_rest);
+      ParserFormalParameters* parameters, Expression* pattern,
+      Expression* initializer, bool is_rest);
   V8_INLINE void DeclareFormalParameter(
       Scope* scope, const ParserFormalParameters::Parameter& parameter,
-      bool is_simple, ExpressionClassifier* classifier);
-  void ParseArrowFunctionFormalParameters(
-      ParserFormalParameters* parameters, Expression* params,
-      const Scanner::Location& params_loc,
-      Scanner::Location* duplicate_loc, bool* ok);
+      ExpressionClassifier* classifier);
+  void ParseArrowFunctionFormalParameters(ParserFormalParameters* parameters,
+                                          Expression* params,
+                                          const Scanner::Location& params_loc,
+                                          bool* ok);
   void ParseArrowFunctionFormalParameterList(
       ParserFormalParameters* parameters, Expression* params,
       const Scanner::Location& params_loc,
@@ -973,6 +977,7 @@ class Parser : public ParserBase<ParserTraits> {
     Parser* parser;
     Scope* declaration_scope;
     Scope* scope;
+    Scope* hoist_scope;
     VariableMode mode;
     bool is_const;
     bool needs_init;
@@ -1068,8 +1073,8 @@ class Parser : public ParserBase<ParserTraits> {
   Statement* ParseWithStatement(ZoneList<const AstRawString*>* labels,
                                 bool* ok);
   CaseClause* ParseCaseClause(bool* default_seen_ptr, bool* ok);
-  SwitchStatement* ParseSwitchStatement(ZoneList<const AstRawString*>* labels,
-                                        bool* ok);
+  Statement* ParseSwitchStatement(ZoneList<const AstRawString*>* labels,
+                                  bool* ok);
   DoWhileStatement* ParseDoWhileStatement(ZoneList<const AstRawString*>* labels,
                                           bool* ok);
   WhileStatement* ParseWhileStatement(ZoneList<const AstRawString*>* labels,
@@ -1129,11 +1134,14 @@ class Parser : public ParserBase<ParserTraits> {
   // hoisted over such a scope.
   void CheckConflictingVarDeclarations(Scope* scope, bool* ok);
 
+  // Implement sloppy block-scoped functions, ES2015 Annex B 3.3
+  void InsertSloppyBlockFunctionVarBindings(Scope* scope, bool* ok);
+
   // Parser support
   VariableProxy* NewUnresolved(const AstRawString* name, VariableMode mode);
   Variable* Declare(Declaration* declaration,
                     DeclarationDescriptor::Kind declaration_kind, bool resolve,
-                    bool* ok);
+                    bool* ok, Scope* declaration_scope = nullptr);
 
   bool TargetStackContainsLabel(const AstRawString* label);
   BreakableStatement* LookupBreakTarget(const AstRawString* label, bool* ok);
@@ -1313,29 +1321,33 @@ Expression* ParserTraits::SpreadCallNew(
 
 
 void ParserTraits::AddFormalParameter(
-    ParserFormalParameters* parameters, Expression* pattern, bool is_rest) {
-  bool is_simple = pattern->IsVariableProxy();
+    ParserFormalParameters* parameters,
+    Expression* pattern, Expression* initializer, bool is_rest) {
+  bool is_simple =
+      !is_rest && pattern->IsVariableProxy() && initializer == nullptr;
   DCHECK(parser_->allow_harmony_destructuring() ||
-         parser_->allow_harmony_rest_parameters() || is_simple);
+         parser_->allow_harmony_rest_parameters() ||
+         parser_->allow_harmony_default_parameters() || is_simple);
   const AstRawString* name = is_simple
                                  ? pattern->AsVariableProxy()->raw_name()
                                  : parser_->ast_value_factory()->empty_string();
   parameters->params.Add(
-      ParserFormalParameters::Parameter(name, pattern, is_rest),
+      ParserFormalParameters::Parameter(name, pattern, initializer, is_rest),
       parameters->scope->zone());
 }
 
 
 void ParserTraits::DeclareFormalParameter(
     Scope* scope, const ParserFormalParameters::Parameter& parameter,
-    bool is_simple, ExpressionClassifier* classifier) {
+    ExpressionClassifier* classifier) {
   bool is_duplicate = false;
-  // TODO(caitp): Remove special handling for rest once desugaring is in.
-  auto name = is_simple || parameter.is_rest
-      ? parameter.name : parser_->ast_value_factory()->empty_string();
-  auto mode = is_simple || parameter.is_rest ? VAR : TEMPORARY;
-  Variable* var =
-      scope->DeclareParameter(name, mode, parameter.is_rest, &is_duplicate);
+  bool is_simple = classifier->is_simple_parameter_list();
+  auto name = parameter.name;
+  auto mode = is_simple ? VAR : TEMPORARY;
+  if (!is_simple) scope->SetHasNonSimpleParameters();
+  bool is_optional = parameter.initializer != nullptr;
+  Variable* var = scope->DeclareParameter(
+      name, mode, is_optional, parameter.is_rest, &is_duplicate);
   if (is_duplicate) {
     classifier->RecordDuplicateFormalParameterError(
         parser_->scanner()->location());
