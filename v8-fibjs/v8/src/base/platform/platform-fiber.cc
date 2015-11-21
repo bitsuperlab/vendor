@@ -2,6 +2,8 @@
 #include "src/profiler/sampler.h"
 #include <exlib/include/fiber.h>
 #include <exlib/include/service.h>
+#include <fc/thread/thread.hpp>
+
 
 #ifdef _WIN32
 
@@ -80,27 +82,27 @@ void Thread::Join()
 
 Thread::LocalStorageKey Thread::CreateThreadLocalKey()
 {
-    return static_cast<LocalStorageKey>(exlib::Thread_base::tlsAlloc());
+    return fc::thread::tlsAlloc();
 }
 
 void Thread::DeleteThreadLocalKey(LocalStorageKey key)
 {
-    exlib::Thread_base::tlsFree(static_cast<int>(key));
+    fc::thread::tlsFree(static_cast<int>(key));
 }
 
 void *Thread::GetThreadLocal(LocalStorageKey key)
 {
-    return exlib::Thread_base::tlsGet(static_cast<int>(key));
+    return fc::thread::tlsGet(static_cast<int>(key));
 }
 
 void Thread::SetThreadLocal(LocalStorageKey key, void *value)
 {
-    exlib::Thread_base::tlsPut(static_cast<int>(key), value);
+    fc::thread::tlsPut(static_cast<int>(key), value);
 }
 
 void OS::Sleep(TimeDelta interval)
 {
-    exlib::OSThread::sleep(interval.InMicroseconds());
+    fc::sleep_until(fc::time_point::now() + fc::milliseconds(500));
 }
 
 }

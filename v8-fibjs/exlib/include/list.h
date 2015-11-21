@@ -45,7 +45,9 @@ public:
 
     void putHead(T *pNew)
     {
+#ifdef DEBUG
         assert(pNew->m_inlist == 0);
+#endif
         assert(pNew->m_next == 0);
         assert(pNew->m_prev == 0);
 
@@ -67,7 +69,9 @@ public:
 
     void putTail(T *pNew)
     {
+#ifdef DEBUG
         assert(pNew->m_inlist == 0);
+#endif
         assert(pNew->m_next == 0);
         assert(pNew->m_prev == 0);
 
@@ -93,7 +97,9 @@ public:
 
         if (pNow)
         {
+#ifdef DEBUG
             assert(pNow->m_inlist == this);
+#endif
 
             m_first = (T *)pNow->m_next;
             if (m_first) {
@@ -144,8 +150,9 @@ public:
     void remove(T* o)
     {
         linkitem *p1, *p2;
-
+#ifdef DEBUG
         assert(o->m_inlist == this);
+#endif
         assert(o->m_next != 0 || o->m_prev != 0 ||
                (m_first == o && m_last == o));
 
