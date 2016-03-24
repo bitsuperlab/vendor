@@ -12,7 +12,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../tools/basic.cmake)
 
 
 IF( WIN32 )
-    target_link_libraries(v8 exlib winmm)
+    target_link_libraries(v8 exlib winmm fc)
 ELSE(WIN32)
     IF(NOT APPLE)
         target_link_libraries( v8 exlib dl )
